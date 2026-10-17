@@ -32,6 +32,11 @@
           <p><a class="btn" href="/listing.html?id=${encodeURIComponent(b.listing_id)}">See the listing</a> <a class="btn ghost" href="/">View the chart</a></p>`;
         return;
       }
+      if (['failed', 'expired', 'cancelled'].includes(b.status)) {
+        const status = { failed: 'Payment failed', expired: 'Payment expired', cancelled: 'Payment cancelled' }[b.status];
+        el.innerHTML = `<h2>${status}</h2><p class="muted">Your boost was not added to the chart. You can try again from the listing page.</p><p><a class="btn" href="/boost.html">Try again</a> <a class="btn ghost" href="/">View the chart</a></p>`;
+        return;
+      }
       if (i < 8) { setTimeout(() => check(i + 1), 2000); return; }
       el.innerHTML = '<h2>Still processing</h2><p class="muted">Your payment has not been confirmed yet. If you were charged, your boost will appear shortly. If it does not, <a href="/contact.html" style="color:var(--accent)">contact us</a> with your email.</p>';
     } catch (e) { el.innerHTML = '<h2>We could not find that boost</h2><p><a class="btn" href="/">Back to the chart</a></p>'; }

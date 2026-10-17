@@ -2,7 +2,7 @@
 
 Monthly Top is a pay-to-rank community directory and leaderboard where people can submit a website, profile, tool, app, or project and pay to move it higher in its category. It is designed for lists like “Best AI tools,” “Top dev tools,” or “Best startup products,” where the ranking is driven by paid boosts rather than editorial selection.
 
-This project is a working Node.js + Express website with a built-in SQLite database, demo checkout flow, admin interface, and public listing pages.
+This project is a working Node.js + Express website with a built-in SQLite database, demo checkout flow, Stripe checkout, optional YOUPI PG hosted UPI checkout, an admin interface, and public listing pages.
 
 ## What the site does
 
@@ -13,7 +13,7 @@ This project is a working Node.js + Express website with a built-in SQLite datab
 - Resets rankings each month
 - Stores listings, boosts, and categories locally in SQLite
 - Includes admin tools to review and manage listings, refunds, and contact messages
-- Supports both demo mode and Stripe-powered live payments
+- Supports demo mode, Stripe, and YOUPI PG hosted UPI payments
 
 ## Example use cases
 
@@ -93,15 +93,23 @@ Copy `.env.example` to `.env` and configure values before going live.
 
 Key settings include:
 
-- `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` for real payments
-- `SITE_URL` for public links and Stripe redirects
+- `PAYMENT_PROVIDER` selects `demo`, `stripe`, or `youpi`. If unset, the app selects Stripe when `STRIPE_SECRET_KEY` is set, otherwise demo mode.
+- `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` for Stripe payments
+- `YOUPI_API_URL`, `YOUPI_MERCHANT_ID`, and `YOUPI_WEBHOOK_SECRET` for YOUPI PG payments
+- `BASE_URL` for public links and payment return redirects
 - `ADMIN_PASSWORD` to enable the admin dashboard
 - `DATAFAST_API_KEY` and `DATAFAST_WEBSITE_ID` for visitor analytics
 - `CREATOR_NAME`, `CREATOR_HANDLE`, `CREATOR_URL`, `CREATOR_BIO`
 - `SITE_TIMEZONE` for month-reset timing
 - `DATA_DIR` for persistent database storage
 
-When Stripe is not configured, the app runs in demo mode and simulates transactions instead of charging real money.
+When no payment provider is configured, the app runs in demo mode and simulates transactions instead of charging real money.
+
+### YOUPI PG setup
+
+YOUPI PG is an external hosted gateway. Run it separately on a persistent Node.js host, then set `PAYMENT_PROVIDER=youpi`, `YOUPI_API_URL` to its HTTPS base URL, and `YOUPI_MERCHANT_ID` in this app's environment. Set `YOUPI_WEBHOOK_SECRET` only as a server-side secret and configure the gateway's webhook URL to `https://your-domain.example/api/youpi/webhook`. The app marks a boost paid only after a valid HMAC-signed webhook matches its payment ID, amount, and currency. Browser redirects do not confirm payment.
+
+The YOUPI gateway's API, SQLite database, and banking observer services are not hosted by this Vercel app; deploy them on infrastructure that supports its persistent processes and observer connections.
 
 ## Deployment
 

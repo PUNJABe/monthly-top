@@ -33,7 +33,23 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const DEFAULT_DATA_DIR = process.env.VERCEL ? '/tmp/monthlytop-data' : path.join(__dirname, 'data');
 const DATA_DIR = process.env.DATA_DIR || DEFAULT_DATA_DIR;
 const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
-const DEMO = !stripe; // no Stripe key => simulated checkout, clearly labelled in the UI
+const PAYMENT_PROVIDER = (process.env.PAYMENT_PROVIDER || (stripe ? 'stripe' : 'demo')).toLowerCase();
+const YOUPI_API_URL = (process.env.YOUPI_API_URL || '').replace(/\/+$/, '');
+const YOUPI_MERCHANT_ID = process.env.YOUPI_MERCHANT_ID || '';
+const YOUPI_WEBHOOK_SECRET = process.env.YOUPI_WEBHOOK_SECRET || '';
+if (!['demo', 'stripe', 'youpi'].includes(PAYMENT_PROVIDER)) throw new Error('PAYMENT_PROVIDER must be demo, stripe, or youpi.');
+const DEMO = PAYMENT_PROVIDER === 'demo';
+function youpiConfigError() {
+  if (CURRENCY !== 'inr') return 'YOUPI payments require CURRENCY=inr.';
+  if (!YOUPI_API_URL || !YOUPI_MERCHANT_ID || !YOUPI_WEBHOOK_SECRET) return 'YOUPI payments are not fully configured.';
+  try {
+    const url = new URL(YOUPI_API_URL);
+    if (url.protocol !== 'https:' && (process.env.VERCEL || process.env.NODE_ENV === 'production')) return 'YOUPI_API_URL must use HTTPS in production.';
+  } catch (e) {
+    return 'YOUPI_API_URL must be a valid URL.';
+  }
+  return null;
+}
 const MAX_CUSTOM_CATEGORIES = 500;
 const BOOST_RATE = parseInt(process.env.BOOST_RATE_LIMIT || '10', 10); // boosts per minute per IP
 
@@ -314,6 +330,7 @@ CREATE TABLE IF NOT EXISTS boosts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   listing_id TEXT NOT NULL, amount_cents INTEGER NOT NULL, currency TEXT NOT NULL, period TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', stripe_session TEXT, stripe_payment_intent TEXT,
+  payment_session TEXT, payment_reference TEXT,
   display_name TEXT, message TEXT, email TEXT, is_demo INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')), paid_at TEXT
 );
@@ -327,6 +344,9 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 INSERT OR IGNORE INTO meta (k, v) VALUES ('launched_at', datetime('now'));
 `);
+  const boostColumns = new Set(db.prepare('PRAGMA table_info(boosts)').all().map((column) => column.name));
+  if (!boostColumns.has('payment_session')) db.exec('ALTER TABLE boosts ADD COLUMN payment_session TEXT');
+  if (!boostColumns.has('payment_reference')) db.exec('ALTER TABLE boosts ADD COLUMN payment_reference TEXT');
   BUILTIN_CATEGORIES.forEach(([slug, name, blurb, icon], i) => {
     db.prepare('INSERT OR IGNORE INTO categories (slug,name,blurb,icon,builtin,sort) VALUES (?,?,?,?,1,?)').run(slug, name, blurb, icon, slug === 'other' ? 2000 : (i + 1) * 10);
   });
@@ -452,8 +472,13 @@ function categoryOverview() {
 function markPaid(boostId, session) {
   const b = db.prepare('SELECT * FROM boosts WHERE id=?').get(boostId);
   if (!b || b.status === 'paid') return b;
-  db.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), stripe_payment_intent=COALESCE(?,stripe_payment_intent) WHERE id=?`)
-    .run(session && session.payment_intent ? String(session.payment_intent) : null, boostId);
+  if (PAYMENT_PROVIDER === 'youpi') {
+    db.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), payment_reference=COALESCE(?,payment_reference) WHERE id=?`)
+      .run(session && session.payment_reference ? String(session.payment_reference) : null, boostId);
+  } else {
+    db.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), stripe_payment_intent=COALESCE(?,stripe_payment_intent) WHERE id=?`)
+      .run(session && session.payment_intent ? String(session.payment_intent) : null, boostId);
+  }
   const l = db.prepare('SELECT * FROM listings WHERE id=?').get(b.listing_id);
   if (l) {
     // The listing goes live, and a brand-new category is created only now that someone has actually paid.
@@ -570,6 +595,33 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) =
   res.json({ received: true });
 });
 
+app.post('/api/youpi/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  if (PAYMENT_PROVIDER !== 'youpi' || !YOUPI_WEBHOOK_SECRET) return res.status(404).end();
+  if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Expected a raw JSON body.' });
+  const signature = String(req.headers['x-gateway-signature'] || '');
+  const hexSignature = signature.startsWith('sha256=') ? signature.slice(7) : '';
+  if (!/^[a-f0-9]{64}$/i.test(hexSignature)) return res.status(401).json({ error: 'Invalid signature.' });
+  const expected = crypto.createHmac('sha256', YOUPI_WEBHOOK_SECRET).update(req.body).digest();
+  if (!crypto.timingSafeEqual(expected, Buffer.from(hexSignature, 'hex'))) return res.status(401).json({ error: 'Invalid signature.' });
+
+  let event;
+  try { event = JSON.parse(req.body.toString('utf8')); }
+  catch (e) { return res.status(400).json({ error: 'Invalid JSON.' }); }
+  const terminalStatuses = { FAILED: 'failed', EXPIRED: 'expired', CANCELLED: 'cancelled' };
+  if (event.event !== 'SUCCESS' && !terminalStatuses[event.event]) return res.status(400).json({ error: 'Unknown payment event.' });
+  const orderMatch = /^monthlytop-boost-(\d+)$/.exec(String(event.orderId || ''));
+  if (!orderMatch || !event.paymentId) return res.status(400).json({ error: 'Invalid payment reference.' });
+  const boostId = Number(orderMatch[1]);
+  const boost = db.prepare('SELECT id,status,amount_cents,currency,payment_session FROM boosts WHERE id=?').get(boostId);
+  if (!boost || boost.payment_session !== String(event.paymentId)) return res.status(404).json({ error: 'Payment not found.' });
+  if (Number(event.amountPaise) !== boost.amount_cents || String(event.currency || '').toLowerCase() !== boost.currency.toLowerCase())
+    return res.status(400).json({ error: 'Payment amount or currency mismatch.' });
+
+  if (event.event === 'SUCCESS') markPaid(boostId, { payment_reference: String(event.paymentId) });
+  else db.prepare('UPDATE boosts SET status=? WHERE id=? AND status=\'pending\'').run(terminalStatuses[event.event], boostId);
+  res.json({ received: true });
+});
+
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api') && (req.path === '/' || !path.extname(req.path) || req.path.endsWith('.html'))) trackVisit(req);
   next();
@@ -578,7 +630,7 @@ app.use(express.json({ limit: '20kb' }));
 
 app.get('/api/config', (req, res) => {
   res.json({
-    siteName: SITE_NAME, currency: CURRENCY, minCents: MIN_CENTS, maxCents: MAX_CENTS, demo: DEMO, period: currentPeriod(),
+    siteName: SITE_NAME, currency: CURRENCY, minCents: MIN_CENTS, maxCents: MAX_CENTS, demo: DEMO, paymentProvider: PAYMENT_PROVIDER, period: currentPeriod(),
     categories: listCategories(), platforms: PLATFORM_LABELS, creator: CREATOR, timezone: SITE_TZ,
     datafast: { websiteId: DF_ID, domain: DF_DOMAIN, shareUrl: DF_SHARE },
   });
@@ -681,6 +733,8 @@ app.post('/api/boost', async (req, res) => {
   if (amount % 100 !== 0) return res.status(400).json({ error: 'Boosts are in whole rupees, with no paise.' });
   if (!validEmail(email)) return res.status(400).json({ error: 'A valid email is required for your receipt.' });
   if (!b.acceptTerms) return res.status(400).json({ error: 'Please accept the Terms to continue.' });
+  const providerError = PAYMENT_PROVIDER === 'youpi' ? youpiConfigError() : PAYMENT_PROVIDER === 'stripe' && !stripe ? 'Stripe payments are not configured.' : null;
+  if (providerError) return res.status(503).json({ error: providerError });
 
   try {
     let listing;
@@ -728,6 +782,34 @@ app.post('/api/boost', async (req, res) => {
 
     if (DEMO) return res.json({ url: `/demo-checkout.html?boost=${boostId}`, demo: true });
 
+    if (PAYMENT_PROVIDER === 'youpi') {
+      const response = await fetch(`${YOUPI_API_URL}/api/v1/payments`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Merchant-Id': YOUPI_MERCHANT_ID,
+          'Idempotency-Key': `monthlytop-boost-${boostId}`,
+        },
+        body: JSON.stringify({
+          orderId: `monthlytop-boost-${boostId}`,
+          amount: (amount / 100).toFixed(2),
+          currency: 'INR',
+          customer: { email },
+          description: `Monthly Top boost: ${listing.title}`.slice(0, 250),
+          returnUrl: `${BASE_URL}/success.html?boost=${boostId}`,
+          metadata: { boostId: String(boostId), listingId: String(listing.id) },
+        }),
+      });
+      if (!response.ok) throw new Error(`YOUPI API returned ${response.status}`);
+      const session = await response.json();
+      if (!session.paymentId || !session.checkoutUrl) throw new Error('YOUPI returned an incomplete checkout session');
+      const checkoutUrl = new URL(session.checkoutUrl);
+      if (checkoutUrl.origin !== new URL(YOUPI_API_URL).origin || checkoutUrl.protocol !== 'https:' && (process.env.VERCEL || process.env.NODE_ENV === 'production'))
+        throw new Error('YOUPI returned an untrusted checkout URL');
+      db.prepare('UPDATE boosts SET payment_session=? WHERE id=?').run(String(session.paymentId), boostId);
+      return res.json({ url: checkoutUrl.href });
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       customer_email: email,
@@ -752,16 +834,17 @@ app.post('/api/boost', async (req, res) => {
 });
 
 app.get('/api/boost/:id', async (req, res) => {
-  const b = db.prepare('SELECT b.id,b.status,b.amount_cents,b.currency,b.period,b.stripe_session,l.id listing_id,l.title,l.key,l.url,l.image FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.id=?').get(req.params.id);
+  const b = db.prepare('SELECT b.id,b.status,b.amount_cents,b.currency,b.period,b.stripe_session,b.payment_session,l.id listing_id,l.title,l.key,l.url,l.image FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.id=?').get(req.params.id);
   if (!b) return res.status(404).json({ error: 'Not found' });
   // Backup for a delayed webhook: confirm directly with Stripe, only for the matching session id.
-  if (b.status === 'pending' && stripe && b.stripe_session && req.query.session_id === b.stripe_session) {
+  if (b.status === 'pending' && PAYMENT_PROVIDER === 'stripe' && stripe && b.stripe_session && req.query.session_id === b.stripe_session) {
     try {
       const s = await stripe.checkout.sessions.retrieve(b.stripe_session);
       if (s.payment_status === 'paid') { markPaid(b.id, s); b.status = 'paid'; }
     } catch (e) { /* webhook will settle it */ }
   }
   delete b.stripe_session;
+  delete b.payment_session;
   res.json(b);
 });
 
@@ -842,6 +925,7 @@ app.post('/api/admin/categories/:slug/delete', adminAuth, (req, res) => {
 app.post('/api/admin/boosts/:id/refund', adminAuth, async (req, res) => {
   const b = db.prepare('SELECT * FROM boosts WHERE id=?').get(req.params.id);
   if (!b || b.status !== 'paid') return res.status(400).json({ error: 'Only paid boosts can be refunded.' });
+  if (PAYMENT_PROVIDER === 'youpi') return res.status(400).json({ error: 'Refund this payment in your YOUPI gateway before changing its status.' });
   try {
     if (stripe && b.stripe_payment_intent) await stripe.refunds.create({ payment_intent: b.stripe_payment_intent });
     else if (stripe) return res.status(400).json({ error: 'No payment reference stored; refund in the Stripe dashboard.' });
