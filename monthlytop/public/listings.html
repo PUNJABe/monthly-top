@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>All listings</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page">
+  <div class="section-head"><h1 style="margin:0">All listings</h1><span class="pill" id="count"></span></div>
+  <p class="sub">Every website, profile, app and AI tool on the site, boosted or not. <a href="/boost.html" style="color:var(--accent)">Add yours</a>.</p>
+  <form id="f" class="filters" role="search">
+    <div><label for="q" class="sr">Search</label><input id="q" type="search" placeholder="Search name, description or link…"></div>
+    <div><label for="cat" class="sr">Category</label><select id="cat"><option value="">All categories</option></select></div>
+    <div><label for="plat" class="sr">Type</label><select id="plat"><option value="">All types</option></select></div>
+  </form>
+  <div class="lgrid" id="grid" aria-live="polite"></div>
+  <div class="pager" id="pager"></div>
+</div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  const params = new URLSearchParams(location.search);
+  const grid = document.getElementById('grid'), pager = document.getElementById('pager');
+  const q = document.getElementById('q'), cat = document.getElementById('cat'), plat = document.getElementById('plat');
+  App.sortedCategories().forEach((c) => cat.insertAdjacentHTML('beforeend', `<option value="${App.esc(c.slug)}">${App.esc(c.name)}</option>`));
+  Object.entries(cfg.platforms || {}).sort((a, b) => (a[0] === 'website' ? -1 : b[0] === 'website' ? 1 : a[1].localeCompare(b[1])))
+    .forEach(([k, v]) => plat.insertAdjacentHTML('beforeend', `<option value="${App.esc(k)}">${App.esc(v)}</option>`));
+  q.value = params.get('q') || ''; cat.value = params.get('category') || ''; plat.value = params.get('platform') || '';
+  let page = 1, timer;
+  async function load() {
+    const url = `/api/listings?page=${page}&q=${encodeURIComponent(q.value.trim())}&category=${encodeURIComponent(cat.value)}&platform=${encodeURIComponent(plat.value)}`;
+    const r = await App.api(url);
+    document.getElementById('count').textContent = App.num(r.total) + ' listing' + (r.total === 1 ? '' : 's');
+    grid.innerHTML = r.items.length ? r.items.map((s) => `
+      <a class="lcard" href="/listing.html?id=${encodeURIComponent(s.id)}">${App.cover(s)}
+        <div class="in"><div class="t">${App.esc(s.title)}</div><div class="d">${App.esc(s.description)}</div>
+          <div class="tags">${App.chip(s.category)}${App.platformChip(s)}</div>
+          ${s.month_cents ? `<div class="am">${App.money(s.month_cents)} this month</div>` : s.all_cents ? `<div class="am">${App.money(s.all_cents)} all time</div>` : '<div class="hint">Not boosted yet</div>'}
+        </div></a>`).join('') : '<div class="empty" style="grid-column:1/-1">No listings match. <a href="/boost.html" style="color:var(--accent)">Add one</a>.</div>';
+    pager.innerHTML = r.pages > 1 ? `<button class="btn ghost small" ${page <= 1 ? 'disabled' : ''} id="p">Previous</button><span class="muted">Page ${r.page} of ${r.pages}</span><button class="btn ghost small" ${page >= r.pages ? 'disabled' : ''} id="n">Next</button>` : '';
+    const p = document.getElementById('p'), n = document.getElementById('n');
+    if (p) p.onclick = () => { page--; load(); scrollTo(0, 0); };
+    if (n) n.onclick = () => { page++; load(); scrollTo(0, 0); };
+  }
+  q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { page = 1; load(); }, 300); });
+  cat.addEventListener('change', () => { page = 1; load(); });
+  plat.addEventListener('change', () => { page = 1; load(); });
+  document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); page = 1; load(); });
+  load().catch(() => { grid.innerHTML = '<div class="empty" style="grid-column:1/-1">Could not load listings.</div>'; });
+})();
+</script>
+</body>
+</html>

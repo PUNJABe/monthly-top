@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Listing</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page" id="root"><div class="empty">Loading…</div></div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  const root = document.getElementById('root');
+  const params = new URLSearchParams(location.search);
+  const id = params.get('id');
+  let data;
+  try { data = await App.api('/api/listings/' + encodeURIComponent(id || '')); }
+  catch (e) { root.innerHTML = `<div class="empty"><b>${App.esc(e.message)}</b><br><br><a class="btn" href="/listings.html">Browse listings</a></div>`; return; }
+  const { listing: l, totals: t, supporters } = data;
+  document.title = l.title + ' · ' + cfg.siteName;
+  const eyebrow = t.rank ? `Currently #${t.rank} this month${t.category_rank ? ' · #' + t.category_rank + ' in ' + App.esc(App.cat(l.category).name) : ''}` : 'Not on this month\'s chart yet';
+  root.innerHTML = `
+    <div class="lhead">
+      ${App.cover(l, 'xl')}
+      <div style="min-width:0">
+        <div class="eyebrow">${eyebrow}</div>
+        <h1>${App.esc(l.title)}</h1>
+        <p class="muted" style="font-size:1.05rem">${App.esc(l.description)}</p>
+        <div class="tags">${App.chip(l.category, true)}${App.platformChip(l)}</div>
+      </div>
+    </div>
+    <p style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <a class="btn" href="${App.esc(l.url)}" target="_blank" rel="noopener nofollow ugc">Visit ${App.esc(l.key)} ${App.icon('ext')}</a>
+      <a class="btn ghost small" href="/contact.html?report=${encodeURIComponent(l.id)}">Report this listing</a>
+    </p>
+    <div class="stats three" style="margin:22px 0">
+      <div class="stat"><b>${App.money(t.month_cents)}</b><span>this month</span></div>
+      <div class="stat"><b>${App.num(t.month_boosts)}</b><span>boost${t.month_boosts === 1 ? '' : 's'} this month</span></div>
+      <div class="stat"><b>${App.money(t.all_cents)}</b><span>all time</span></div>
+    </div>
+    ${params.get('cancelled') ? '<div class="notice">Checkout was cancelled. You have not been charged.</div>' : ''}
+    <div class="two" style="grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px">
+      <form class="panel" id="bf" novalidate><h3>Boost this listing</h3>${App.boostFieldsHTML()}</form>
+      <section><h2 style="font-size:1.3rem">Recent supporters</h2>
+        ${supporters.length ? `<ul class="supporters">${supporters.map((s) => `<li><div><b>${App.esc(s.display_name)}</b>${s.message ? `<q>${App.esc(s.message)}</q>` : ''}</div><span class="am">${App.money(s.amount_cents)}</span></li>`).join('')}</ul>` : '<div class="empty">No boosts yet. Be the first.</div>'}
+      </section>
+    </div>`;
+  const ctl = App.boostBind(document.getElementById('bf'));
+  document.getElementById('bf').addEventListener('submit', async (e) => {
+    e.preventDefault(); ctl.error(''); ctl.busy(true);
+    try { const r = await App.api('/api/boost', { body: { ...ctl.get(), listingId: l.id } }); location.href = r.url; }
+    catch (ex) { ctl.error(ex.message); ctl.busy(false); }
+  });
+  if (window.matchMedia('(max-width: 800px)').matches) document.querySelector('.two').style.gridTemplateColumns = '1fr';
+})();
+</script>
+</body>
+</html>

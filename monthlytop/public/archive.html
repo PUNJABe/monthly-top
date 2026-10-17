@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Past winners</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page">
+  <h1>Past winners</h1>
+  <p class="sub">The top three of every completed month. Each month starts again from zero.</p>
+  <div id="list" style="display:grid;gap:32px"><div class="empty">Loading…</div></div>
+</div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  await App.ready;
+  const el = document.getElementById('list');
+  try {
+    const r = await App.api('/api/archive');
+    el.innerHTML = r.items.length ? r.items.map((m) => `
+      <section><h2>${App.esc(App.monthName(m.period))}</h2><ol class="chart">${m.top.map(App.row).join('')}</ol></section>`).join('')
+      : '<div class="empty">No month has finished yet. Check back after the first month closes.</div>';
+  } catch (e) { el.innerHTML = '<div class="empty">Could not load the archive.</div>'; }
+})();
+</script>
+</body>
+</html>

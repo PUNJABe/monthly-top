@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Rules</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main><div class="wrap"><div class="prose">
+
+  <h1>Rules</h1>
+  <p class="lede"><span class="siteName"></span> is a public leaderboard. There are no ads, no votes and no revenue share. You pay to stand above everyone else, and rank is what you pay, nothing else.</p>
+
+  <h2>The boards</h2>
+  <p>One payment counts on every board that includes it. The boards just look at different windows of time and different groups of listings.</p>
+  <ul>
+    <li><a href="/">This month</a> is the main board. It covers the current calendar month in <span class="tzname">India time</span> and resets to zero at midnight on the 1st.</li>
+    <li><a href="/">All time</a> adds up everything ever paid for a listing. It never resets.</li>
+    <li><a href="/categories.html">Categories</a> give every listing a home. Each category has its own ranking for the month and for all time.</li>
+    <li><a href="/archive.html">Past winners</a> keeps the final chart of every finished month.</li>
+  </ul>
+
+  <h2>How ranking works</h2>
+  <ul>
+    <li>Boosts are in whole rupees. The minimum is <span class="num" data-min></span> and the maximum is <span class="num" data-max></span> per boost.</li>
+    <li>A listing's rank is the total of its paid boosts in the period. Boost as often as you like and it all adds up.</li>
+    <li>If two listings have the same total, the one that reached it first keeps the higher rank.</li>
+    <li>Already listed? Paste the same link again, or use the boost form on its page. The payment is added to its total. Nobody can take your spot except by paying more.</li>
+    <li>Only completed payments count. Pending, failed and refunded boosts are not in any total.</li>
+    <li>A boost counts for the month in which you start checkout.</li>
+    <li>One link is one listing. A website is identified by its domain. Profiles, channels, repositories and apps are identified by their own page, so two GitHub users, or two apps in the same store, never share a rank. Anything after a <span class="num">?</span> in a link is removed, so tracking and referral links do not create separate listings.</li>
+  </ul>
+
+  <h2>What you can list</h2>
+  <ul>
+    <li>A product or business website, or a profile, channel, repository, package, app or AI model page on a supported platform: <span id="plats">GitHub, LinkedIn, Instagram, YouTube, X and more</span>. Typing <span class="num">@handle</span> lists that X profile.</li>
+    <li>Chat and invite links are not allowed: Telegram, WhatsApp, Discord, Messenger, Signal and similar. This board is for products and profiles, not group chats.</li>
+    <li>Adult content is not allowed. If it is porn, NSFW or an adult platform, it does not belong here.</li>
+    <li>Link shorteners are not accepted. Paste the full link.</li>
+    <li>Scams, phishing, malware, counterfeit goods, hate, and anything illegal or infringing are not allowed. Describe your listing honestly: misleading names and descriptions are removed.</li>
+    <li>We may remove any listing, name, description, category or message at our discretion, and refund the affected boosts where appropriate.</li>
+  </ul>
+
+  <h2>Categories</h2>
+  <ul>
+    <li>Every listing sits in one category. Whoever lists it first writes the name and description and picks the category. They are locked after that.</li>
+    <li>Does your category not exist? Choose <b>Create a new category</b> when you list. We check the name against the existing ones, and if it already exists we use that one. A new category appears on the site once your payment completes.</li>
+    <li>Something needs fixing or a listing is in the wrong category? <a href="/contact.html">Contact us</a> and we will change it.</li>
+  </ul>
+
+  <h2>After you pay</h2>
+  <ul>
+    <li>Your listing is public. Clicks go to the link you submitted. The listing page shows your display name (or "Anonymous"), your message and the amount. Your email is never shown.</li>
+    <li>A completed payment is what claims the rank. Boosts are final, except in the cases in the <a href="/refunds.html">Refund Policy</a>.</li>
+    <li>A boost is a payment for ranking on this chart. It is not an endorsement of what is listed, and nothing is paid to the owner of the listed link.</li>
+    <li>Paying means you agree to the <a href="/terms.html">Terms of Service</a> and <a href="/privacy.html">Privacy Policy</a>.</li>
+  </ul>
+  <p class="muted" id="built" style="margin-top:2em"></p>
+</div></div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  document.querySelectorAll('.siteName').forEach((e) => (e.textContent = cfg.siteName));
+  document.querySelector('[data-min]').textContent = App.money(cfg.minCents);
+  document.querySelector('[data-max]').textContent = App.money(cfg.maxCents);
+  document.querySelector('.tzname').textContent = cfg.timezone === 'Asia/Kolkata' ? 'India time (IST)' : cfg.timezone;
+  const labels = Object.entries(cfg.platforms || {}).filter(([k]) => k !== 'website').map(([, v]) => v);
+  if (labels.length) document.getElementById('plats').textContent = labels.join(', ');
+  const cr = cfg.creator || {};
+  if (cr.name) document.getElementById('built').innerHTML = 'Built by ' + (cr.url ? `<a href="${App.esc(cr.url)}" target="_blank" rel="noopener">${App.esc(cr.name)}</a>` : App.esc(cr.name)) + '.';
+})();
+</script>
+</body>
+</html>

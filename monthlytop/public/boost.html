@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Get listed</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page">
+  <h1>Get listed</h1>
+  <p class="sub">Paste a link to your website, profile, app or AI model, say what it does, and pay to push it up the chart. Already listed? Paste the same link to boost it again.</p>
+  <div id="root"></div>
+</div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  const params = new URLSearchParams(location.search);
+  const root = document.getElementById('root');
+  // Which category fits each kind of link? Only a suggestion: the person can always change it.
+  const SUGGEST = { github: 'people', gitlab: 'people', linkedin: 'people', x: 'people', instagram: 'creators', youtube: 'creators', tiktok: 'creators', twitch: 'creators',
+    threads: 'creators', facebook: 'creators', medium: 'writing', producthunt: 'directories', huggingface: 'ai-models', playstore: 'apps', appstore: 'apps', npm: 'open-source',
+    pypi: 'open-source', behance: 'design', dribbble: 'design', codepen: 'dev-tools', soundcloud: 'audio', kaggle: 'analytics', linktree: 'people', biolink: 'people', beacons: 'people', peerlist: 'people', pinterest: 'design' };
+  const exists = (slug) => cfg.categories.some((c) => c.slug === slug);
+  const catOptions = '<option value="">Choose a category…</option>' + App.sortedCategories().map((c) => `<option value="${App.esc(c.slug)}">${App.esc(c.name)}</option>`).join('') + '<option value="__new">+ Create a new category…</option>';
+
+  root.innerHTML = `
+    ${params.get('cancelled') ? '<div class="notice formcard">Checkout was cancelled. You have not been charged.</div>' : ''}
+    <form id="bf" class="formcard" novalidate>
+      <div class="panel">
+        <h3>1. What are you listing?</h3>
+        <div class="field" style="margin-bottom:0">
+          <label for="url">Website, profile link or @handle</label>
+          <input id="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="300" placeholder="yoursite.com, github.com/you, linkedin.com/in/you or @you">
+        </div>
+        <div class="lk" id="lk" aria-live="polite"></div>
+        <div class="hint">Websites, GitHub, LinkedIn, Instagram, YouTube, X, TikTok, apps, AI models and more. Tracking parameters are removed. Read the <a href="/rules.html" style="color:var(--accent)">rules</a>.</div>
+      </div>
+      <div class="panel" id="details" hidden>
+        <h3>2. Tell people what it is</h3>
+        <div class="field"><label for="title">Name <span class="counter" id="tc">0/70</span></label><input id="title" type="text" maxlength="70" placeholder="e.g. Acme Analytics"></div>
+        <div class="field"><label for="desc">What does it do? <span class="counter" id="dc">0/160</span></label><textarea id="desc" maxlength="160" style="min-height:84px" placeholder="One clear sentence."></textarea></div>
+        <div class="field" style="margin-bottom:0">
+          <label for="cat">Category</label>
+          <select id="cat">${catOptions}</select>
+          <div id="newcatbox" hidden style="margin-top:12px">
+            <label for="newcat">New category name <span class="counter" id="nc">0/32</span></label>
+            <input id="newcat" type="text" maxlength="32" placeholder="e.g. Pet Care">
+            <div class="lk" id="nclk" style="min-height:0;margin-top:8px"></div>
+          </div>
+          <div class="hint">Pick the closest match. Not there? Choose "Create a new category". A new category appears on the site once your payment completes.</div>
+        </div>
+      </div>
+      <div class="panel" id="payp" hidden><h3 id="payh">3. Boost it</h3>${App.boostFieldsHTML()}</div>
+    </form>`;
+
+  const $ = (id) => document.getElementById(id);
+  const form = $('bf'), urlEl = $('url'), lk = $('lk'), details = $('details'), payp = $('payp');
+  const cat = $('cat'), newcat = $('newcat'), newbox = $('newcatbox'), nclk = $('nclk');
+  const ctl = App.boostBind(form);
+  let cur = null, seq = 0, timer, picked = false; // picked: the person chose a category themselves, so stop suggesting
+
+  const counter = (input, out, max) => { const f = () => { out.textContent = input.value.length + '/' + max; }; input.addEventListener('input', f); f(); };
+  counter($('title'), $('tc'), 70); counter($('desc'), $('dc'), 160); counter(newcat, $('nc'), 32);
+
+  async function check() {
+    const v = urlEl.value.trim();
+    cur = null; details.hidden = true; payp.hidden = true;
+    if (!v) { lk.className = 'lk'; lk.textContent = ''; return; }
+    const my = ++seq;
+    lk.className = 'lk'; lk.textContent = 'Checking…';
+    try {
+      const r = await App.api('/api/lookup?url=' + encodeURIComponent(v));
+      if (my !== seq) return;
+      if (!r.ok) { lk.className = 'lk bad'; lk.textContent = r.error; return; }
+      cur = r;
+      const logo = App.cover({ title: r.key, key: r.key, image: r.image, platform: r.platform }, 'sm');
+      if (r.existing) {
+        const e = r.existing;
+        lk.className = 'lk info';
+        lk.innerHTML = `${logo}<span><b>${App.esc(e.title)}</b> is already listed${e.rank ? ' at #' + e.rank + ' this month' : ''} in ${App.chip(e.category)}. Your boost adds to its total.</span>`;
+        $('payh').textContent = '2. Boost it';
+        payp.hidden = false;
+      } else {
+        lk.className = 'lk ok';
+        lk.innerHTML = `${logo}<span>✓ <b>${App.esc(r.key)}</b> can be listed${r.platform !== 'website' ? ' as a ' + App.esc(r.platform_label) + ' link' : ''}.</span>`;
+        $('payh').textContent = '3. Boost it';
+        details.hidden = false; payp.hidden = false;
+        if (!picked) {
+          let s = SUGGEST[r.platform];
+          if ((r.platform === 'github' || r.platform === 'gitlab') && r.key.split('/').length > 2) s = 'open-source';
+          cat.value = s && exists(s) ? s : '';
+        }
+      }
+    } catch (e) { if (my === seq) { lk.className = 'lk bad'; lk.textContent = e.message; } }
+  }
+  urlEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(check, 450); });
+  urlEl.addEventListener('blur', () => { clearTimeout(timer); if (urlEl.value.trim() && !cur) check(); });
+  if (params.get('url')) { urlEl.value = params.get('url'); check(); }
+  if (params.get('c') && exists(params.get('c'))) { cat.value = params.get('c'); picked = true; }
+
+  cat.addEventListener('change', () => { picked = true; newbox.hidden = cat.value !== '__new'; if (cat.value === '__new') newcat.focus(); });
+  newcat.addEventListener('input', () => {
+    const n = newcat.value.trim().replace(/\s+/g, ' ').toLowerCase();
+    const ex = n ? cfg.categories.find((c) => c.name.toLowerCase() === n) : null;
+    if (ex) { nclk.className = 'lk info'; nclk.innerHTML = `<span>“${App.esc(ex.name)}” already exists.</span> <button type="button" class="btn small ghost" data-use="${App.esc(ex.slug)}">Use it</button>`; }
+    else { nclk.className = 'lk'; nclk.textContent = ''; }
+  });
+  nclk.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-use]');
+    if (b) { cat.value = b.dataset.use; newbox.hidden = true; newcat.value = ''; nclk.textContent = ''; }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault(); ctl.error('');
+    if (!cur) { ctl.error('Paste a valid link first.'); urlEl.focus(); return; }
+    const body = ctl.get();
+    if (cur.existing) body.listingId = cur.existing.id;
+    else {
+      body.url = urlEl.value.trim();
+      body.title = $('title').value; body.description = $('desc').value;
+      if (cat.value === '__new') body.newCategory = newcat.value; else body.category = cat.value;
+    }
+    ctl.busy(true);
+    try { const r = await App.api('/api/boost', { body }); location.href = r.url; }
+    catch (ex) { ctl.error(ex.message); ctl.busy(false); }
+  });
+})();
+</script>
+</body>
+</html>

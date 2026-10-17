@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Category</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page" id="root"><div class="empty">Loading…</div></div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  const slug = new URLSearchParams(location.search).get('c');
+  const c = cfg.categories.find((x) => x.slug === slug);
+  const root = document.getElementById('root');
+  if (!c) { root.innerHTML = '<div class="empty"><b>That category does not exist.</b><br><br><a class="btn" href="/categories.html">All categories</a></div>'; return; }
+  document.title = c.name + ' · ' + cfg.siteName;
+  root.innerHTML = `
+    <p><a href="/categories.html" class="muted" style="text-decoration:none">← All categories</a></p>
+    <h1 style="display:flex;align-items:center;gap:14px"><span class="accent" style="display:grid">${App.icon(c.icon).replace('class="ic"', 'class="ic" style="width:44px;height:44px"')}</span>${App.esc(c.name)}</h1>
+    <p class="sub">${App.esc(c.blurb || '')}</p>
+    <div class="section-head">
+      <div class="tabs" role="tablist" aria-label="Period"><button role="tab" data-p="month" aria-selected="true">This month</button><button role="tab" data-p="all" aria-selected="false">All time</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn ghost small" href="/listings.html?category=${encodeURIComponent(c.slug)}">Everything in ${App.esc(c.name)}</a><a class="btn small" href="/boost.html?c=${encodeURIComponent(c.slug)}">Get listed here</a></div>
+    </div>
+    <ol class="chart" id="chart"><li class="empty">Loading…</li></ol>`;
+  const el = document.getElementById('chart');
+  async function load(mode) {
+    const lb = await App.api(`/api/leaderboard?limit=50&category=${encodeURIComponent(c.slug)}&period=${mode === 'all' ? 'all' : cfg.period}`);
+    el.innerHTML = lb.items.length ? lb.items.map(App.row).join('')
+      : `<li class="empty"><b>No boosts in ${App.esc(c.name)} ${mode === 'all' ? 'yet' : 'this month'}.</b><br>Be the first and take #1.<br><br><a class="btn" href="/boost.html?c=${encodeURIComponent(c.slug)}">Get listed</a></li>`;
+  }
+  document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach((x) => x.setAttribute('aria-selected', x === b));
+    load(b.dataset.p).catch(() => {});
+  }));
+  load('month').catch(() => { el.innerHTML = '<li class="empty">Could not load this category.</li>'; });
+})();
+</script>
+</body>
+</html>

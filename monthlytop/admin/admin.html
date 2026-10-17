@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="noindex">
+<title>Admin</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap" style="padding:32px 0">
+  <h1 style="font-size:2rem">Admin</h1>
+  <div class="stats" id="stats"></div>
+  <h2 style="margin-top:36px">Recent boosts</h2>
+  <div class="panel scroll-x"><table class="t" id="boosts"></table></div>
+  <h2 style="margin-top:36px">Listings</h2>
+  <div class="panel scroll-x"><table class="t" id="listings"></table></div>
+  <h2 style="margin-top:36px">Categories</h2>
+  <div class="panel scroll-x"><table class="t" id="cats"></table></div>
+  <h2 style="margin-top:36px">Contact messages</h2>
+  <div class="panel scroll-x"><table class="t" id="msgs"></table></div>
+</div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  await App.ready;
+  const E = App.esc;
+  async function post(url, body) {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Failed');
+  }
+  let D = null;
+  async function load() {
+    const d = D = await App.api('/api/admin/overview');
+    document.getElementById('stats').innerHTML = [
+      [App.money(d.total_cents, d.currency), 'total paid'], [App.money(d.month_cents, d.currency), 'this month'], [d.total_boosts, 'paid boosts'], [d.demo ? 'DEMO' : 'LIVE', 'payment mode'],
+    ].map(([b, s]) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`).join('');
+    document.getElementById('boosts').innerHTML = '<tr><th>#</th><th>Listing</th><th>Amount</th><th>Status</th><th>From</th><th>Date</th><th></th></tr>' +
+      d.boosts.map((b) => `<tr><td>${b.id}</td><td>${E(b.title)}<br><span class="muted">${E(b.key)}</span></td><td>${App.money(b.amount_cents, b.currency)}</td><td>${E(b.status)}</td><td>${E(b.display_name || '')}<br><span class="muted">${E(b.email || '')}</span></td><td>${E(b.paid_at || b.created_at)}</td><td>${b.status === 'paid' ? `<button class="btn ghost small" data-refund="${b.id}">Refund</button>` : ''}</td></tr>`).join('');
+    document.getElementById('listings').innerHTML = '<tr><th>Listing</th><th>Category</th><th>Status</th><th></th></tr>' +
+      d.listings.map((l) => `<tr><td><b>${E(l.title)}</b><br><a href="${E(l.url)}" target="_blank" rel="noopener nofollow" class="muted">${E(l.key)}</a><br><span class="muted">${E(l.description)}</span></td>
+        <td><select data-cat="${E(l.id)}" style="padding:6px 30px 6px 10px">${d.categories.map((c) => `<option value="${E(c.slug)}"${c.slug === l.category ? ' selected' : ''}>${E(c.name)}</option>`).join('')}</select></td>
+        <td>${l.hidden ? 'Hidden' : 'Visible'}</td>
+        <td style="white-space:nowrap"><button class="btn ghost small" data-edit="${E(l.id)}">Edit</button> <button class="btn ghost small" data-hide="${E(l.id)}" data-v="${l.hidden ? 0 : 1}">${l.hidden ? 'Unhide' : 'Hide'}</button></td></tr>`).join('');
+    document.getElementById('cats').innerHTML = '<tr><th>Category</th><th>Listings</th><th>Type</th><th></th></tr>' +
+      d.categories.map((c) => `<tr><td>${E(c.name)}</td><td>${c.n}</td><td>${c.builtin ? 'Built in' : 'Added by a user'}</td><td style="white-space:nowrap"><button class="btn ghost small" data-rename="${E(c.slug)}">Rename</button>${c.builtin ? '' : ` <button class="btn ghost small" data-delcat="${E(c.slug)}">Delete</button>`}</td></tr>`).join('');
+    document.getElementById('msgs').innerHTML = '<tr><th>From</th><th>Message</th><th>Date</th></tr>' +
+      d.messages.map((m) => `<tr><td>${E(m.name)}<br><span class="muted">${E(m.email)}</span></td><td style="white-space:pre-wrap">${E(m.body)}</td><td>${E(m.created_at)}</td></tr>`).join('');
+  }
+  document.addEventListener('change', async (e) => {
+    const c = e.target.closest('[data-cat]');
+    if (c) { try { await post(`/api/admin/listings/${encodeURIComponent(c.dataset.cat)}/category`, { category: c.value }); App.toast('Category updated'); } catch (x) { App.toast(x.message); } }
+  });
+  document.addEventListener('click', async (e) => {
+    const r = e.target.closest('[data-refund]'), h = e.target.closest('[data-hide]'), ed = e.target.closest('[data-edit]');
+    const rn = e.target.closest('[data-rename]'), dc = e.target.closest('[data-delcat]');
+    try {
+      if (r && confirm('Refund boost #' + r.dataset.refund + '? This cannot be undone.')) { await post(`/api/admin/boosts/${r.dataset.refund}/refund`); await load(); }
+      if (h) { await post(`/api/admin/listings/${encodeURIComponent(h.dataset.hide)}/hidden`, { hidden: h.dataset.v === '1' }); await load(); }
+      if (ed) {
+        const l = D.listings.find((x) => x.id === ed.dataset.edit);
+        const title = prompt('Name', l.title); if (title === null) return;
+        const description = prompt('Description', l.description); if (description === null) return;
+        await post(`/api/admin/listings/${encodeURIComponent(l.id)}/edit`, { title, description }); await load();
+      }
+      if (rn) {
+        const c = D.categories.find((x) => x.slug === rn.dataset.rename);
+        const name = prompt('New name for this category', c.name); if (name === null) return;
+        await post(`/api/admin/categories/${encodeURIComponent(c.slug)}/rename`, { name }); await load();
+      }
+      if (dc && confirm('Delete this category? Its listings move to "Everything Else".')) { await post(`/api/admin/categories/${encodeURIComponent(dc.dataset.delcat)}/delete`); await load(); }
+    } catch (x) { App.toast(x.message); }
+  });
+  load().catch((x) => App.toast(x.message));
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Contact</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main><div class="wrap"><div class="prose">
+
+  <h1>Contact us</h1>
+  <p class="muted">Support, refund requests, category changes, listing reports, takedowns and privacy requests. We reply by email.</p>
+  <form id="cf" class="panel" novalidate>
+    <div class="field"><label for="n">Name</label><input id="n" type="text" maxlength="80" required></div>
+    <div class="field"><label for="e">Email</label><input id="e" type="email" required></div>
+    <div class="field"><label for="b">Message</label><textarea id="b" maxlength="2000" required></textarea></div>
+    <div class="err" id="err" role="alert"></div>
+    <button class="btn" type="submit">Send message</button>
+  </form>
+</div></div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  await App.ready;
+  const rep = new URLSearchParams(location.search).get('report');
+  if (rep) document.getElementById('b').value = `I would like to report this listing: ${location.origin}/listing.html?id=${encodeURIComponent(rep)}\n\nReason: `;
+  document.getElementById('cf').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('err'); err.textContent = '';
+    try {
+      await App.api('/api/contact', { body: { name: document.getElementById('n').value, email: document.getElementById('e').value, body: document.getElementById('b').value } });
+      document.getElementById('cf').innerHTML = '<h3>Thank you</h3><p class="muted">Your message was sent. We will reply by email.</p>';
+    } catch (x) { err.textContent = x.message; }
+  });
+})();
+</script>
+</body>
+</html>

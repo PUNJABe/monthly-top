@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>About</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page" style="max-width:860px;margin-inline:auto">
+  <h1>About</h1>
+  <p class="sub" style="color:var(--text);opacity:.85"><span class="siteName"></span> is a public leaderboard for websites, profiles, apps and AI tools. Anyone can list a link, and rank is what you pay: no ads, no votes, no revenue share. Just claim <b class="accent">#1</b>.</p>
+
+  <h2 style="margin-top:36px">Why it exists</h2>
+  <p class="muted">Most rankings are decided by algorithms or editors. This one is decided by how much people are willing to put behind a link, and every payment is public on the listing's page. Each month the chart resets, so there is always a fresh shot at the top.</p>
+
+  <h2 style="margin-top:36px">Then it went live</h2>
+  <p class="muted" id="launch">&nbsp;</p>
+  <p class="muted">Here is where things stand:</p>
+  <div class="stats three" id="stats" aria-live="polite"></div>
+  <p class="muted" id="vnote" style="font-size:.8rem;margin-top:10px"></p>
+
+  <h2 style="margin-top:40px">How it works</h2>
+  <ol class="steps">
+    <li><b>Paste a link.</b> A website, or a profile, channel, repository, app or AI model page on GitHub, LinkedIn, Instagram, YouTube, X and more.</li>
+    <li><b>Say what it is.</b> Add a name and a one-line description, then pick a category. If yours is missing, create it.</li>
+    <li><b>Boost it.</b> Choose an amount in rupees and pay securely. Your boost is added to the listing's total.</li>
+    <li><b>Climb the chart.</b> Listings are ranked by total money paid, on the main chart and inside their category. At month end the chart resets and the winners go to <a href="/archive.html" style="color:var(--accent)">Past winners</a>.</li>
+  </ol>
+  <p style="margin-top:18px"><a class="btn" href="/boost.html">Get listed</a> <a class="btn ghost" href="/rules.html">Read the rules</a></p>
+
+  <h2 style="margin-top:44px">The creator</h2>
+  <div id="creator"></div>
+</div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  document.querySelector('.siteName').textContent = cfg.siteName;
+  try {
+    const a = await App.api('/api/about');
+    if (a.launched_at) {
+      const when = new Date(a.launched_at).toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short', timeZone: cfg.timezone });
+      document.getElementById('launch').textContent = 'The site launched on ' + when + '.';
+    }
+    const v = a.visitors || {};
+    const top = a.top_all;
+    const tiles = [
+      [`${v.online > 0 ? '<i class="dot"></i>' : ''}${App.num(v.total)}`, 'visitors'],
+      [`<span class="cur">${App.esc(App.symbol())}</span>${App.num(Math.round(a.raised_cents / 100))}`, 'raised in total'],
+      [top ? `<span class="cur">${App.esc(App.symbol())}</span>${App.num(Math.round(top.total_cents / 100))}` : '–', top ? 'highest total · ' + App.esc(top.title) : 'highest total (so far)'],
+      [App.num(a.listed), 'listings'],
+      [App.num(a.added_today), 'listings added today'],
+      [`<span class="cur">${App.esc(App.symbol())}</span>${App.num(Math.round(a.raised_today_cents / 100))}`, 'raised today'],
+    ];
+    document.getElementById('stats').innerHTML = tiles.map(([b, s]) => `<div class="stat"><b>${b}</b><span title="${s.replace(/<[^>]+>/g, '')}">${s}</span></div>`).join('');
+    document.getElementById('vnote').textContent = v.source === 'datafast' ? 'Visitor numbers are counted by DataFast analytics.' : 'Visitor numbers come from our own cookieless counter.';
+  } catch (e) { document.getElementById('stats').innerHTML = '<div class="empty" style="grid-column:1/-1">Could not load the numbers.</div>'; }
+
+  const cr = cfg.creator || {};
+  document.getElementById('creator').innerHTML = cr.name
+    ? `<div class="creator"><div class="av">${App.esc(cr.name[0].toUpperCase())}</div><div><b style="font-size:1.1rem">${App.esc(cr.name)}</b>${cr.handle ? ` <span class="muted">${App.esc(cr.handle)}</span>` : ''}${cr.bio ? `<p class="muted" style="margin:6px 0 0">${App.esc(cr.bio)}</p>` : ''}${cr.url ? `<p style="margin:8px 0 0"><a href="${App.esc(cr.url)}" target="_blank" rel="noopener" style="color:var(--accent)">${App.esc(cr.url.replace(/^https?:\/\//, ''))}</a></p>` : ''}</div></div>`
+    : `<div class="slot"><b>Space for the creator</b><br>Name, photo, short bio and links go here. Set <code>CREATOR_NAME</code>, <code>CREATOR_HANDLE</code>, <code>CREATOR_URL</code> and <code>CREATOR_BIO</code> in the <code>.env</code> file and this box fills itself in.</div>`;
+})();
+</script>
+</body>
+</html>

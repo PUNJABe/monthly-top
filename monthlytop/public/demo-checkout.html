@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Demo checkout</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<main><div class="wrap"><div class="prose">
+
+  <h1>Demo checkout</h1>
+  <div class="panel" id="p"><p class="muted">Loading…</p></div>
+</div></div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  const cfg = await App.ready;
+  const el = document.getElementById('p');
+  if (!cfg.demo) { el.innerHTML = '<p>Demo checkout is disabled because live payments are configured.</p>'; return; }
+  const id = new URLSearchParams(location.search).get('boost');
+  try {
+    const b = await App.api('/api/demo/boost/' + encodeURIComponent(id));
+    el.innerHTML = `<p><span class="pill warn">DEMO MODE</span></p>
+      <p>You are boosting <b>${App.esc(b.title)}</b> (${App.esc(b.key)}) with <b>${App.money(b.amount_cents, b.currency)}</b>.</p>
+      <p class="muted">This is a simulated payment page. No money moves. Add your Stripe key to enable real payments.</p>
+      <button class="btn" id="pay">Simulate successful payment</button> <a class="btn ghost" href="/">Cancel</a>`;
+    document.getElementById('pay').onclick = async () => {
+      await App.api('/api/demo/confirm/' + encodeURIComponent(id), { body: {} });
+      location.href = '/success.html?boost=' + encodeURIComponent(id);
+    };
+  } catch (e) { el.innerHTML = '<p>Boost not found.</p>'; }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Categories</title>
+<meta name="description" content="A public leaderboard for websites, profiles, apps and AI tools. Pay more, rank higher.">
+<script>try{var t=localStorage.getItem('theme');if(!t)t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<main><div class="wrap page">
+  <h1>Categories</h1>
+  <p class="sub">Every category has its own ranking. Pick one to see who leads it.</p>
+  <div class="hot" id="hotBox" hidden>
+    <h3>Most active categories</h3>
+    <p class="muted" style="margin:0;font-size:.9rem">Where boosts are landing right now, and who is holding the top spot.</p>
+    <div class="hot-grid" id="hot"></div>
+  </div>
+  <div class="cat-grid" id="grid" aria-live="polite"></div>
+</div></main>
+<script src="/js/app.js"></script>
+<script>
+(async () => {
+  await App.ready;
+  const grid = document.getElementById('grid');
+  try {
+    const { items, hot } = await App.api('/api/categories');
+    if (hot.length) {
+      document.getElementById('hotBox').hidden = false;
+      document.getElementById('hot').innerHTML = hot.map((c, i) => {
+        const lead = c.top[0];
+        return `<a class="hotcard" href="/category.html?c=${encodeURIComponent(c.slug)}">
+          <div class="k">#${i + 1}${i === 0 ? ' hottest' : ''}</div>
+          <div class="n">${App.icon(c.icon)}${App.esc(c.name)}</div>
+          <div class="m"><span>${c.boosts_month} boost${c.boosts_month === 1 ? '' : 's'}</span><span>${App.ago(c.last_boost_at)}</span></div>
+          ${lead ? `<div class="lead">${App.cover(lead, 'sm')}<span>Leading</span><b>${App.esc(lead.title)}</b><em>${App.money(lead.total_cents)}</em></div>` : ''}
+        </a>`;
+      }).join('');
+    }
+    // busiest categories first, the rest in the usual order
+    const sorted = items.slice().sort((a, b) => b.boosts_month - a.boosts_month);
+    grid.innerHTML = sorted.map((c) => `
+      <section class="catcard">
+        <a href="/category.html?c=${encodeURIComponent(c.slug)}" style="display:flex"><header style="margin:0 0 14px;width:100%">${App.icon(c.icon)}<span>${App.esc(c.name)}</span></header></a>
+        <div class="mini">${c.top.length ? c.top.map((s) => `
+          <a href="/listing.html?id=${encodeURIComponent(s.id)}"><span class="k">#${s.rank}</span>${App.cover(s, 'sm')}<span class="tt">${App.esc(s.title)}</span><span class="am">${App.money(s.total_cents)}</span></a>`).join('')
+          : `<div class="none">No boosts this month.<br><a href="/boost.html?c=${encodeURIComponent(c.slug)}" style="display:inline;background:none;padding:0;color:var(--accent);font-weight:600">Claim #1</a></div>`}</div>
+      </section>`).join('') + `
+      <section class="catcard new"><b>Not here?</b><p>List your link and create a category for it. It appears as soon as your payment completes.</p><a class="btn small" href="/boost.html">Get listed</a></section>`;
+  } catch (e) { grid.innerHTML = '<div class="empty" style="grid-column:1/-1">Could not load categories.</div>'; }
+})();
+</script>
+</body>
+</html>
