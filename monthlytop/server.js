@@ -30,7 +30,8 @@ const SITE_TZ = process.env.SITE_TIMEZONE || 'Asia/Kolkata';
 let DF_DOMAIN = process.env.DATAFAST_DOMAIN || '';
 try { if (!DF_DOMAIN) DF_DOMAIN = new URL(process.env.BASE_URL || '').hostname; } catch (e) { /* none */ }
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DEFAULT_DATA_DIR = process.env.VERCEL ? '/tmp/monthlytop-data' : path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || DEFAULT_DATA_DIR;
 const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
 const DEMO = !stripe; // no Stripe key => simulated checkout, clearly labelled in the UI
 const MAX_CUSTOM_CATEGORIES = 500;
