@@ -2,7 +2,7 @@
 
 Monthly Top is a pay-to-rank community directory and leaderboard where people can submit a website, profile, tool, app, or project and pay to move it higher in its category. It is designed for lists like “Best AI tools,” “Top dev tools,” or “Best startup products,” where the ranking is driven by paid boosts rather than editorial selection.
 
-This project is a working Node.js + Express website with a built-in SQLite database, demo checkout flow, Stripe checkout, optional YOUPI PG hosted UPI checkout, an admin interface, and public listing pages.
+This project is a working Node.js + Express website with SQLite for local development, optional managed PostgreSQL for durable deployments, demo checkout, Stripe checkout, optional YOUPI PG hosted UPI checkout, an admin interface, and public listing pages.
 
 ## What the site does
 
@@ -97,11 +97,12 @@ Key settings include:
 - `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` for Stripe payments
 - `YOUPI_API_URL`, `YOUPI_MERCHANT_ID`, and `YOUPI_WEBHOOK_SECRET` for YOUPI PG payments
 - `BASE_URL` for public links and payment return redirects
+- `DATABASE_URL` for a pooled managed PostgreSQL connection. If unset, the app uses its local SQLite fallback.
 - `ADMIN_PASSWORD` to enable the admin dashboard
 - `DATAFAST_API_KEY` and `DATAFAST_WEBSITE_ID` for visitor analytics
 - `CREATOR_NAME`, `CREATOR_HANDLE`, `CREATOR_URL`, `CREATOR_BIO`
 - `SITE_TIMEZONE` for month-reset timing
-- `DATA_DIR` for persistent database storage
+- `DATA_DIR` for the local SQLite fallback
 
 When no payment provider is configured, the app runs in demo mode and simulates transactions instead of charging real money.
 
@@ -110,6 +111,8 @@ When no payment provider is configured, the app runs in demo mode and simulates 
 YOUPI PG is an external hosted gateway. Run it separately on a persistent Node.js host, then set `PAYMENT_PROVIDER=youpi`, `YOUPI_API_URL` to its HTTPS base URL, and `YOUPI_MERCHANT_ID` in this app's environment. Set `YOUPI_WEBHOOK_SECRET` only as a server-side secret and configure the gateway's webhook URL to `https://your-domain.example/api/youpi/webhook`. The app marks a boost paid only after a valid HMAC-signed webhook matches its payment ID, amount, and currency. Browser redirects do not confirm payment.
 
 The YOUPI gateway's API, SQLite database, and banking observer services are not hosted by this Vercel app; deploy them on infrastructure that supports its persistent processes and observer connections.
+
+On Vercel, connect managed PostgreSQL and set `DATABASE_URL` before accepting real payments. Vercel's `/tmp` SQLite fallback is only for development/demo use; it is neither durable nor shared across function instances. To preserve an existing SQLite dataset, import it once with `node scripts/import-sqlite.js path/to/data.db` after setting `DATABASE_URL`.
 
 ## Deployment
 

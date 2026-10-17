@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
-const initSqlJs = require('sql.js'); // pure JavaScript SQLite: nothing to compile, installs everywhere
+const { openDatabase } = require('./database');
 
 // ---------- config ----------
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -42,11 +42,20 @@ const DEMO = PAYMENT_PROVIDER === 'demo';
 function youpiConfigError() {
   if (CURRENCY !== 'inr') return 'YOUPI payments require CURRENCY=inr.';
   if (!YOUPI_API_URL || !YOUPI_MERCHANT_ID || !YOUPI_WEBHOOK_SECRET) return 'YOUPI payments are not fully configured.';
+  if (process.env.VERCEL && (!db || db.dialect !== 'postgres')) return 'Configure managed Postgres with DATABASE_URL before enabling YOUPI payments on Vercel.';
   try {
     const url = new URL(YOUPI_API_URL);
     if (url.protocol !== 'https:' && (process.env.VERCEL || process.env.NODE_ENV === 'production')) return 'YOUPI_API_URL must use HTTPS in production.';
   } catch (e) {
     return 'YOUPI_API_URL must be a valid URL.';
+  }
+  if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+    try {
+      const returnUrl = new URL(BASE_URL);
+      if (returnUrl.protocol !== 'https:' || /^(localhost|127\.0\.0\.1)$/.test(returnUrl.hostname)) return 'BASE_URL must be the public HTTPS site URL in production.';
+    } catch (e) {
+      return 'BASE_URL must be a valid public URL.';
+    }
   }
   return null;
 }
@@ -258,62 +267,20 @@ function normalizeTarget(input) {
 }
 
 // ---------- database ----------
-fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_FILE = path.join(DATA_DIR, 'data.db');
-
-// Small better-sqlite3-style wrapper over sql.js. The whole database is saved to DB_FILE after every write
-// (atomic temp-file + rename), so a crash can never leave a half-written file.
 let db;
-async function openDb(file) {
-  const SQL = await initSqlJs();
-  const raw = fs.existsSync(file) ? new SQL.Database(fs.readFileSync(file)) : new SQL.Database();
-  const persist = () => {
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, Buffer.from(raw.export()));
-    fs.renameSync(tmp, file);
-  };
-  const toBind = (args) => {
-    if (args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
-      const o = {};
-      for (const k of Object.keys(args[0])) o['@' + k] = args[0][k] === undefined ? null : args[0][k];
-      return o;
-    }
-    return args.map((v) => (v === undefined ? null : v));
-  };
-  return {
-    exec(sql) { raw.exec(sql); persist(); },
-    prepare(sql) {
-      return {
-        get(...args) {
-          const st = raw.prepare(sql);
-          try { if (args.length) st.bind(toBind(args)); return st.step() ? st.getAsObject() : undefined; } finally { st.free(); }
-        },
-        all(...args) {
-          const st = raw.prepare(sql);
-          try { if (args.length) st.bind(toBind(args)); const rows = []; while (st.step()) rows.push(st.getAsObject()); return rows; } finally { st.free(); }
-        },
-        run(...args) {
-          const st = raw.prepare(sql);
-          try { if (args.length) st.bind(toBind(args)); st.step(); } finally { st.free(); }
-          const changes = raw.getRowsModified();
-          const lastInsertRowid = raw.exec('SELECT last_insert_rowid()')[0].values[0][0];
-          persist();
-          return { changes, lastInsertRowid };
-        },
-      };
-    },
-  };
-}
 
 async function initDb() {
-  db = await openDb(DB_FILE);
-  // Earlier versions of this project ranked songs. Keep a backup copy, then start the listings schema.
-  if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='songs'").get()) {
-    try { fs.copyFileSync(DB_FILE, DB_FILE + '.songs-backup'); } catch (e) { /* best effort */ }
-    db.exec('DROP TABLE IF EXISTS songs; DROP TABLE IF EXISTS boosts;');
-    console.log('Upgraded from the songs version. A backup of the old data is in ' + DB_FILE + '.songs-backup');
-  }
-  db.exec(`
+  if (!process.env.DATABASE_URL && !process.env.POSTGRES_URL) fs.mkdirSync(DATA_DIR, { recursive: true });
+  db = await openDatabase({ file: DB_FILE, connectionString: process.env.DATABASE_URL || process.env.POSTGRES_URL });
+  if (db.dialect === 'sqlite') {
+    // Earlier versions ranked songs. Preserve the old database before applying the listings schema.
+    if (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='songs'").get()) {
+      try { fs.copyFileSync(DB_FILE, DB_FILE + '.songs-backup'); } catch (e) { /* best effort */ }
+      await db.exec('DROP TABLE IF EXISTS songs; DROP TABLE IF EXISTS boosts;');
+      console.log('Upgraded from the songs version. A backup of the old data is in ' + DB_FILE + '.songs-backup');
+    }
+    await db.exec(`
 CREATE TABLE IF NOT EXISTS categories (
   slug TEXT PRIMARY KEY, name TEXT NOT NULL, blurb TEXT, icon TEXT,
   builtin INTEGER NOT NULL DEFAULT 0, is_demo INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 1000,
@@ -342,18 +309,21 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-INSERT OR IGNORE INTO meta (k, v) VALUES ('launched_at', datetime('now'));
 `);
-  const boostColumns = new Set(db.prepare('PRAGMA table_info(boosts)').all().map((column) => column.name));
-  if (!boostColumns.has('payment_session')) db.exec('ALTER TABLE boosts ADD COLUMN payment_session TEXT');
-  if (!boostColumns.has('payment_reference')) db.exec('ALTER TABLE boosts ADD COLUMN payment_reference TEXT');
-  BUILTIN_CATEGORIES.forEach(([slug, name, blurb, icon], i) => {
-    db.prepare('INSERT OR IGNORE INTO categories (slug,name,blurb,icon,builtin,sort) VALUES (?,?,?,?,1,?)').run(slug, name, blurb, icon, slug === 'other' ? 2000 : (i + 1) * 10);
-  });
+    const boostColumns = new Set((await db.prepare('PRAGMA table_info(boosts)').all()).map((column) => column.name));
+    if (!boostColumns.has('payment_session')) await db.exec('ALTER TABLE boosts ADD COLUMN payment_session TEXT');
+    if (!boostColumns.has('payment_reference')) await db.exec('ALTER TABLE boosts ADD COLUMN payment_reference TEXT');
+  }
+  await db.prepare('INSERT INTO meta (k,v) VALUES (?,?) ON CONFLICT(k) DO NOTHING')
+    .run('launched_at', new Date().toISOString().slice(0, 19).replace('T', ' '));
+  for (const [index, [slug, name, blurb, icon]] of BUILTIN_CATEGORIES.entries()) {
+    await db.prepare('INSERT INTO categories (slug,name,blurb,icon,builtin,sort) VALUES (?,?,?,?,1,?) ON CONFLICT(slug) DO NOTHING')
+      .run(slug, name, blurb, icon, slug === 'other' ? 2000 : (index + 1) * 10);
+  }
 
   if (DEMO) {
     // A few clearly fictional listings so the site is browsable before launch. They never appear once a Stripe key is set.
-    if (db.prepare('SELECT COUNT(*) c FROM listings').get().c === 0) {
+    if ((await db.prepare('SELECT COUNT(*) c FROM listings').get()).c === 0) {
       const demo = [
         ['pingboard.example', 'Pingboard', 'Uptime monitoring with plain-English alerts.', 'dev-tools'],
         ['northwind-analytics.example', 'Northwind Analytics', 'Simple website analytics that respects privacy.', 'analytics'],
@@ -369,11 +339,11 @@ INSERT OR IGNORE INTO meta (k, v) VALUES ('launched_at', datetime('now'));
         ['orbit-learn.example', 'Orbit Learn', 'Short interactive courses on data and design.', 'education'],
       ];
       const ins = db.prepare("INSERT INTO listings (id,key,url,platform,title,description,image,category,live,is_demo) VALUES (?,?,?,?,?,?,NULL,?,1,1)");
-      demo.forEach(([key, title, desc, cat]) => ins.run('demo-' + key.split('.')[0], key, 'https://' + key + '/', 'website', title, desc, cat));
+      for (const [key, title, desc, cat] of demo) await ins.run('demo-' + key.split('.')[0], key, 'https://' + key + '/', 'website', title, desc, cat);
     }
   } else {
     // Going live: drop everything created while testing in demo mode.
-    db.exec(`DELETE FROM boosts WHERE is_demo=1;
+    await db.exec(`DELETE FROM boosts WHERE is_demo=1;
 DELETE FROM listings WHERE is_demo=1 AND id NOT IN (SELECT listing_id FROM boosts);
 DELETE FROM categories WHERE is_demo=1 AND slug NOT IN (SELECT category FROM listings WHERE category IS NOT NULL);`);
   }
@@ -389,6 +359,13 @@ const tzOffsetMs = (d = new Date()) => {
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - Math.floor(d.getTime() / 1000) * 1000;
 };
 const sqlTs = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+const timestampISO = (value) => {
+  if (!value) return null;
+  let normalized = String(value).trim().replace(' ', 'T').replace(/\.(\d{3})\d+(?=([+-]|Z|$))/, '$1').replace(/([+-]\d{2})$/, '$1:00');
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized)) normalized += 'Z';
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
 const startOfTodayUTC = () => { const [y, m, d] = localDay().split('-').map(Number); return sqlTs(Date.UTC(y, m - 1, d) - tzOffsetMs()); };
 const monthEndsAt = () => { const [y, m] = currentPeriod().split('-').map(Number); return new Date(Date.UTC(y, m, 1) - tzOffsetMs()).toISOString(); };
 const isPeriod = (p) => /^\d{4}-(0[1-9]|1[0-2])$/.test(p || '');
@@ -420,76 +397,81 @@ function validCategoryName(raw) {
   n = n[0].toUpperCase() + n.slice(1);
   return { name: n };
 }
-const findCategoryByName = (name) => db.prepare('SELECT * FROM categories WHERE LOWER(name)=LOWER(?)').get(name);
-const categoryExists = (slug) => !!db.prepare('SELECT 1 FROM categories WHERE slug=?').get(slug);
-const customCategoryCount = () => db.prepare('SELECT COUNT(*) n FROM categories WHERE builtin=0').get().n;
-function ensureCategory(name, isDemo) {
-  const ex = findCategoryByName(name);
+const findCategoryByName = async (name, database = db) => database.prepare('SELECT * FROM categories WHERE LOWER(name)=LOWER(?)').get(name);
+const categoryExists = async (slug, database = db) => !!(await database.prepare('SELECT 1 FROM categories WHERE slug=?').get(slug));
+const customCategoryCount = async (database = db) => (await database.prepare('SELECT COUNT(*) n FROM categories WHERE builtin=0').get()).n;
+async function ensureCategory(name, isDemo, database = db) {
+  const ex = await findCategoryByName(name, database);
   if (ex) return ex.slug;
   let slug = slugify(name);
-  if (categoryExists(slug)) slug += '-' + crypto.randomBytes(2).toString('hex');
-  db.prepare("INSERT INTO categories (slug,name,blurb,icon,builtin,is_demo,sort) VALUES (?,?,?,?,0,?,1000)").run(slug, name, 'Added by the community', 'tag', isDemo ? 1 : 0);
+  if (await categoryExists(slug, database)) slug += '-' + crypto.randomBytes(2).toString('hex');
+  await database.prepare("INSERT INTO categories (slug,name,blurb,icon,builtin,is_demo,sort) VALUES (?,?,?,?,0,?,1000) ON CONFLICT(slug) DO NOTHING")
+    .run(slug, name, 'Added by the community', 'tag', isDemo ? 1 : 0);
   return slug;
 }
-const listCategories = () => db.prepare('SELECT slug,name,blurb,icon,builtin FROM categories ORDER BY sort, name').all();
+const listCategories = (database = db) => database.prepare('SELECT slug,name,blurb,icon,builtin FROM categories ORDER BY sort, name').all();
 
 // ---------- queries ----------
 const COLS = `l.id, l.title, l.description, l.url, l.key, l.platform, l.image, COALESCE(l.category,'other') AS category`;
 // period: 'YYYY-MM' for a month, or 'all' for all time. category: optional slug.
-function leaderboard(period, limit = 50, category = null) {
+async function leaderboard(period, limit = 50, category = null, database = db) {
   const where = ["b.status='paid'", 'l.hidden=0', 'l.live=1'];
   const args = [];
   if (period !== 'all') { where.push('b.period=?'); args.push(period); }
   if (category) { where.push("COALESCE(l.category,'other')=?"); args.push(category); }
   args.push(limit);
-  return db.prepare(`
+  return (await database.prepare(`
     SELECT ${COLS},
-           SUM(b.amount_cents) AS total_cents, COUNT(b.id) AS boosts, COUNT(DISTINCT COALESCE(NULLIF(b.email,''), b.id)) AS supporters,
+           SUM(b.amount_cents) AS total_cents, COUNT(b.id) AS boosts, COUNT(DISTINCT COALESCE(NULLIF(b.email,''), CAST(b.id AS TEXT))) AS supporters,
            MAX(b.paid_at) AS last_boost_at
     FROM boosts b JOIN listings l ON l.id = b.listing_id
     WHERE ${where.join(' AND ')}
-    GROUP BY l.id ORDER BY total_cents DESC, MIN(b.paid_at) ASC LIMIT ?`).all(...args)
+    GROUP BY l.id ORDER BY total_cents DESC, MIN(b.paid_at) ASC LIMIT ?`).all(...args))
     .map((r, i) => decorate({ ...r, rank: i + 1 }));
 }
-function listingTotals(id, category) {
+async function listingTotals(id, category) {
   const p = currentPeriod();
-  const month = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE listing_id=? AND status='paid' AND period=?`).get(id, p);
-  const all = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE listing_id=? AND status='paid'`).get(id);
-  const rank = leaderboard(p, 1000).find((r) => r.id === id);
-  const crank = category ? leaderboard(p, 1000, category).find((r) => r.id === id) : null;
+  const month = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE listing_id=? AND status='paid' AND period=?`).get(id, p);
+  const all = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE listing_id=? AND status='paid'`).get(id);
+  const rank = (await leaderboard(p, 1000)).find((r) => r.id === id);
+  const crank = category ? (await leaderboard(p, 1000, category)).find((r) => r.id === id) : null;
   return { month_cents: month.c, month_boosts: month.n, all_cents: all.c, all_boosts: all.n, rank: rank ? rank.rank : null, category_rank: crank ? crank.rank : null };
 }
-function categoryOverview() {
+async function categoryOverview() {
   const p = currentPeriod();
-  const items = listCategories().map((c) => {
-    const act = db.prepare(`SELECT COUNT(*) n, MAX(b.paid_at) last FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.status='paid' AND b.period=? AND l.hidden=0 AND l.live=1 AND COALESCE(l.category,'other')=?`).get(p, c.slug);
-    const listings = db.prepare(`SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1 AND COALESCE(category,'other')=?`).get(c.slug).n;
-    return { ...c, top: leaderboard(p, 3, c.slug), boosts_month: act.n, last_boost_at: act.last || null, listings };
-  });
+  const items = await Promise.all((await listCategories()).map(async (c) => {
+    const [act, listings, top] = await Promise.all([
+      db.prepare(`SELECT COUNT(*) n, MAX(b.paid_at) last FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.status='paid' AND b.period=? AND l.hidden=0 AND l.live=1 AND COALESCE(l.category,'other')=?`).get(p, c.slug),
+      db.prepare(`SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1 AND COALESCE(category,'other')=?`).get(c.slug),
+      leaderboard(p, 3, c.slug),
+    ]);
+    return { ...c, top, boosts_month: act.n, last_boost_at: act.last || null, listings: listings.n };
+  }));
   const hot = items.filter((c) => c.boosts_month > 0).sort((a, b) => (b.last_boost_at > a.last_boost_at ? 1 : -1)).slice(0, 3);
   return { items, hot };
 }
-function markPaid(boostId, session) {
-  const b = db.prepare('SELECT * FROM boosts WHERE id=?').get(boostId);
-  if (!b || b.status === 'paid') return b;
-  if (PAYMENT_PROVIDER === 'youpi') {
-    db.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), payment_reference=COALESCE(?,payment_reference) WHERE id=?`)
-      .run(session && session.payment_reference ? String(session.payment_reference) : null, boostId);
-  } else {
-    db.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), stripe_payment_intent=COALESCE(?,stripe_payment_intent) WHERE id=?`)
-      .run(session && session.payment_intent ? String(session.payment_intent) : null, boostId);
-  }
-  const l = db.prepare('SELECT * FROM listings WHERE id=?').get(b.listing_id);
-  if (l) {
-    // The listing goes live, and a brand-new category is created only now that someone has actually paid.
-    let cat = l.category;
-    if (l.pending_category) cat = ensureCategory(l.pending_category, b.is_demo);
-    db.prepare('UPDATE listings SET live=1, category=?, pending_category=NULL WHERE id=?').run(cat || 'other', l.id);
-  }
-  return db.prepare('SELECT * FROM boosts WHERE id=?').get(boostId);
+async function markPaid(boostId, session) {
+  return db.transaction(async (transaction) => {
+    const b = await transaction.prepare('SELECT * FROM boosts WHERE id=?').get(boostId);
+    if (!b || b.status === 'paid') return b;
+    if (PAYMENT_PROVIDER === 'youpi') {
+      await transaction.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), payment_reference=COALESCE(?,payment_reference) WHERE id=?`)
+        .run(session && session.payment_reference ? String(session.payment_reference) : null, boostId);
+    } else {
+      await transaction.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), stripe_payment_intent=COALESCE(?,stripe_payment_intent) WHERE id=?`)
+        .run(session && session.payment_intent ? String(session.payment_intent) : null, boostId);
+    }
+    const listing = await transaction.prepare('SELECT * FROM listings WHERE id=?').get(b.listing_id);
+    if (listing) {
+      let category = listing.category;
+      if (listing.pending_category) category = await ensureCategory(listing.pending_category, b.is_demo, transaction);
+      await transaction.prepare('UPDATE listings SET live=1, category=?, pending_category=NULL WHERE id=?').run(category || 'other', listing.id);
+    }
+    return transaction.prepare('SELECT * FROM boosts WHERE id=?').get(boostId);
+  });
 }
 setInterval(() => {
-  try { db.exec("DELETE FROM listings WHERE live=0 AND created_at < datetime('now','-3 day') AND id NOT IN (SELECT listing_id FROM boosts WHERE status='paid')"); } catch (e) { /* retry later */ }
+  if (db) db.prepare("DELETE FROM listings WHERE live=0 AND created_at < datetime('now','-3 day') AND id NOT IN (SELECT listing_id FROM boosts WHERE status='paid')").run().catch(() => {});
 }, 3600000).unref();
 
 // ---------- visitors: DataFast when configured, otherwise a built-in cookieless counter ----------
@@ -560,6 +542,7 @@ async function getVisitors() {
 // ---------- app ----------
 const app = express();
 const dbReady = initDb();
+const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 module.exports = app;
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -580,7 +563,7 @@ app.use((req, res, next) => {
 });
 
 // Stripe webhook needs the raw body, so it is registered before express.json()
-app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+app.post('/api/webhook', express.raw({ type: 'application/json' }), asyncRoute(async (req, res) => {
   if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) return res.status(400).send('Webhook not configured');
   let event;
   try {
@@ -590,12 +573,12 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) =
   }
   if (event.type === 'checkout.session.completed' || event.type === 'checkout.session.async_payment_succeeded') {
     const s = event.data.object;
-    if (s.payment_status === 'paid' && s.metadata && s.metadata.boost_id) markPaid(Number(s.metadata.boost_id), s);
+    if (s.payment_status === 'paid' && s.metadata && s.metadata.boost_id) await markPaid(Number(s.metadata.boost_id), s);
   }
   res.json({ received: true });
-});
+}));
 
-app.post('/api/youpi/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+app.post('/api/youpi/webhook', express.raw({ type: 'application/json' }), asyncRoute(async (req, res) => {
   if (PAYMENT_PROVIDER !== 'youpi' || !YOUPI_WEBHOOK_SECRET) return res.status(404).end();
   if (!Buffer.isBuffer(req.body)) return res.status(400).json({ error: 'Expected a raw JSON body.' });
   const signature = String(req.headers['x-gateway-signature'] || '');
@@ -612,15 +595,15 @@ app.post('/api/youpi/webhook', express.raw({ type: 'application/json' }), (req, 
   const orderMatch = /^monthlytop-boost-(\d+)$/.exec(String(event.orderId || ''));
   if (!orderMatch || !event.paymentId) return res.status(400).json({ error: 'Invalid payment reference.' });
   const boostId = Number(orderMatch[1]);
-  const boost = db.prepare('SELECT id,status,amount_cents,currency,payment_session FROM boosts WHERE id=?').get(boostId);
+  const boost = await db.prepare('SELECT id,status,amount_cents,currency,payment_session FROM boosts WHERE id=?').get(boostId);
   if (!boost || boost.payment_session !== String(event.paymentId)) return res.status(404).json({ error: 'Payment not found.' });
   if (Number(event.amountPaise) !== boost.amount_cents || String(event.currency || '').toLowerCase() !== boost.currency.toLowerCase())
     return res.status(400).json({ error: 'Payment amount or currency mismatch.' });
 
-  if (event.event === 'SUCCESS') markPaid(boostId, { payment_reference: String(event.paymentId) });
-  else db.prepare('UPDATE boosts SET status=? WHERE id=? AND status=\'pending\'').run(terminalStatuses[event.event], boostId);
+  if (event.event === 'SUCCESS') await markPaid(boostId, { payment_reference: String(event.paymentId) });
+  else await db.prepare('UPDATE boosts SET status=? WHERE id=? AND status=\'pending\'').run(terminalStatuses[event.event], boostId);
   res.json({ received: true });
-});
+}));
 
 app.use((req, res, next) => {
   if (req.method === 'GET' && !req.path.startsWith('/api') && (req.path === '/' || !path.extname(req.path) || req.path.endsWith('.html'))) trackVisit(req);
@@ -628,66 +611,66 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '20kb' }));
 
-app.get('/api/config', (req, res) => {
+app.get('/api/config', asyncRoute(async (req, res) => {
   res.json({
     siteName: SITE_NAME, currency: CURRENCY, minCents: MIN_CENTS, maxCents: MAX_CENTS, demo: DEMO, paymentProvider: PAYMENT_PROVIDER, period: currentPeriod(),
-    categories: listCategories(), platforms: PLATFORM_LABELS, creator: CREATOR, timezone: SITE_TZ,
+    categories: await listCategories(), platforms: PLATFORM_LABELS, creator: CREATOR, timezone: SITE_TZ,
     datafast: { websiteId: DF_ID, domain: DF_DOMAIN, shareUrl: DF_SHARE },
   });
-});
+}));
 
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', asyncRoute(async (req, res) => {
   const p = currentPeriod();
-  const m = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid' AND period=?`).get(p);
-  const inRace = db.prepare(`SELECT COUNT(DISTINCT listing_id) n FROM boosts WHERE status='paid' AND period=?`).get(p).n;
-  const listed = db.prepare('SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1').get().n;
+  const m = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid' AND period=?`).get(p);
+  const inRace = (await db.prepare(`SELECT COUNT(DISTINCT listing_id) n FROM boosts WHERE status='paid' AND period=?`).get(p)).n;
+  const listed = (await db.prepare('SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1').get()).n;
   res.json({ period: p, raised_cents: m.c, boosts: m.n, in_race: inRace, listed, ends_at: monthEndsAt() });
-});
+}));
 
 app.get('/api/visitors', async (req, res) => {
   try { res.json(await getVisitors()); } catch (e) { res.json(builtinVisitors()); }
 });
 
-app.get('/api/about', async (req, res) => {
-  const all = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid'`).get();
-  const today = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid' AND paid_at >= ?`).get(startOfTodayUTC());
-  const topAll = leaderboard('all', 1)[0] || null;
-  const listed = db.prepare('SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1').get().n;
-  const addedToday = db.prepare(`SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1 AND created_at >= ?`).get(startOfTodayUTC()).n;
-  const launched = db.prepare("SELECT v FROM meta WHERE k='launched_at'").get();
+app.get('/api/about', asyncRoute(async (req, res) => {
+  const all = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid'`).get();
+  const today = await db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid' AND paid_at >= ?`).get(startOfTodayUTC());
+  const topAll = (await leaderboard('all', 1))[0] || null;
+  const listed = (await db.prepare('SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1').get()).n;
+  const addedToday = (await db.prepare(`SELECT COUNT(*) n FROM listings WHERE hidden=0 AND live=1 AND created_at >= ?`).get(startOfTodayUTC())).n;
+  const launched = await db.prepare("SELECT v FROM meta WHERE k='launched_at'").get();
   let visitors; try { visitors = await getVisitors(); } catch (e) { visitors = builtinVisitors(); }
   res.json({
     visitors, raised_cents: all.c, boosts: all.n, raised_today_cents: today.c, boosts_today: today.n,
     top_all: topAll ? { id: topAll.id, title: topAll.title, total_cents: topAll.total_cents } : null,
-    listed, added_today: addedToday, launched_at: launched ? launched.v.replace(' ', 'T') + 'Z' : null,
+    listed, added_today: addedToday, launched_at: launched ? timestampISO(launched.v) : null,
   });
-});
+}));
 
-app.get('/api/categories', (req, res) => res.json(categoryOverview()));
+app.get('/api/categories', asyncRoute(async (req, res) => res.json(await categoryOverview())));
 
-app.get('/api/leaderboard', (req, res) => {
+app.get('/api/leaderboard', asyncRoute(async (req, res) => {
   const period = req.query.period === 'all' ? 'all' : isPeriod(req.query.period) ? req.query.period : currentPeriod();
-  const category = req.query.category && categoryExists(String(req.query.category)) ? String(req.query.category) : null;
+  const category = req.query.category && await categoryExists(String(req.query.category)) ? String(req.query.category) : null;
   const limit = Math.min(parseInt(req.query.limit || '50', 10) || 50, 100);
-  res.json({ period, category, items: leaderboard(period, limit, category) });
-});
+  res.json({ period, category, items: await leaderboard(period, limit, category) });
+}));
 
 // Check a link before payment: is it allowed, what is it, and is it already listed?
-app.get('/api/lookup', (req, res) => {
+app.get('/api/lookup', asyncRoute(async (req, res) => {
   if (!rateLimit('l:' + req.ip, 90, 60000)) return res.status(429).json({ error: 'Too many checks. Slow down a little.' });
   const t = normalizeTarget(req.query.url);
   if (t.error) return res.json({ ok: false, error: t.error });
-  const l = db.prepare('SELECT * FROM listings WHERE key=?').get(t.key);
+  const l = await db.prepare('SELECT * FROM listings WHERE key=?').get(t.key);
   let existing = null;
   if (l && l.hidden) return res.json({ ok: false, error: 'This listing has been removed from the site.' });
   if (l && l.live) {
-    const tot = listingTotals(l.id, l.category || 'other');
+    const tot = await listingTotals(l.id, l.category || 'other');
     existing = { id: l.id, title: l.title, description: l.description, category: l.category || 'other', rank: tot.rank, month_cents: tot.month_cents, all_cents: tot.all_cents };
   }
   res.json({ ok: true, key: t.key, url: t.url, platform: t.platform, platform_label: PLATFORM_LABELS[t.platform] || 'Website', image: t.image, existing });
-});
+}));
 
-app.get('/api/listings', (req, res) => {
+app.get('/api/listings', asyncRoute(async (req, res) => {
   const q = clean(req.query.q, 100);
   const page = Math.max(parseInt(req.query.page || '1', 10) || 1, 1);
   const per = 24;
@@ -695,35 +678,35 @@ app.get('/api/listings', (req, res) => {
   const where = ['l.hidden=0', 'l.live=1'];
   const args = [];
   if (q) { where.push('(l.title LIKE ? OR l.description LIKE ? OR l.key LIKE ?)'); args.push(like, like, like); }
-  const cat = req.query.category && categoryExists(String(req.query.category)) ? String(req.query.category) : null;
+  const cat = req.query.category && await categoryExists(String(req.query.category)) ? String(req.query.category) : null;
   if (cat) { where.push("COALESCE(l.category,'other')=?"); args.push(cat); }
   const plat = clean(req.query.platform, 30);
   if (plat && PLATFORM_LABELS[plat]) { where.push('l.platform=?'); args.push(plat); }
-  const total = db.prepare(`SELECT COUNT(*) n FROM listings l WHERE ${where.join(' AND ')}`).get(...args).n;
-  const items = db.prepare(`
+  const total = (await db.prepare(`SELECT COUNT(*) n FROM listings l WHERE ${where.join(' AND ')}`).get(...args)).n;
+  const items = (await db.prepare(`
     SELECT ${COLS},
       COALESCE((SELECT SUM(amount_cents) FROM boosts b WHERE b.listing_id=l.id AND b.status='paid'),0) AS all_cents,
       COALESCE((SELECT SUM(amount_cents) FROM boosts b WHERE b.listing_id=l.id AND b.status='paid' AND b.period=?),0) AS month_cents
     FROM listings l WHERE ${where.join(' AND ')} ORDER BY month_cents DESC, all_cents DESC, l.title ASC LIMIT ? OFFSET ?`)
-    .all(currentPeriod(), ...args, per, (page - 1) * per).map(decorate);
+    .all(currentPeriod(), ...args, per, (page - 1) * per)).map(decorate);
   res.json({ items, total, page, pages: Math.max(Math.ceil(total / per), 1) });
-});
+}));
 
-app.get('/api/listings/:id', (req, res) => {
-  const l = db.prepare('SELECT * FROM listings WHERE id=? AND hidden=0 AND live=1').get(req.params.id);
+app.get('/api/listings/:id', asyncRoute(async (req, res) => {
+  const l = await db.prepare('SELECT * FROM listings WHERE id=? AND hidden=0 AND live=1').get(req.params.id);
   if (!l) return res.status(404).json({ error: 'Listing not found' });
   const cat = l.category || 'other';
-  const supporters = db.prepare(`SELECT display_name, message, amount_cents, paid_at FROM boosts WHERE listing_id=? AND status='paid' ORDER BY paid_at DESC LIMIT 15`).all(l.id)
+  const supporters = (await db.prepare(`SELECT display_name, message, amount_cents, paid_at FROM boosts WHERE listing_id=? AND status='paid' ORDER BY paid_at DESC LIMIT 15`).all(l.id))
     .map((b) => ({ ...b, display_name: b.display_name || 'Anonymous' }));
-  res.json({ listing: decorate({ id: l.id, title: l.title, description: l.description, url: l.url, key: l.key, platform: l.platform, image: l.image, category: cat }), totals: listingTotals(l.id, cat), supporters });
-});
+  res.json({ listing: decorate({ id: l.id, title: l.title, description: l.description, url: l.url, key: l.key, platform: l.platform, image: l.image, category: cat }), totals: await listingTotals(l.id, cat), supporters });
+}));
 
-app.get('/api/archive', (req, res) => {
-  const periods = db.prepare(`SELECT DISTINCT period FROM boosts WHERE status='paid' AND period<>? ORDER BY period DESC LIMIT 36`).all(currentPeriod());
-  res.json({ items: periods.map((p) => ({ period: p.period, top: leaderboard(p.period, 3) })) });
-});
+app.get('/api/archive', asyncRoute(async (req, res) => {
+  const periods = await db.prepare(`SELECT DISTINCT period FROM boosts WHERE status='paid' AND period<>? ORDER BY period DESC LIMIT 36`).all(currentPeriod());
+  res.json({ items: await Promise.all(periods.map(async (p) => ({ period: p.period, top: await leaderboard(p.period, 3) }))) });
+}));
 
-app.post('/api/boost', async (req, res) => {
+app.post('/api/boost', asyncRoute(async (req, res) => {
   if (!rateLimit('b:' + req.ip, BOOST_RATE, 60000)) return res.status(429).json({ error: 'Too many attempts. Please wait a minute.' });
   const b = req.body || {};
   const amount = Math.round(Number(b.amountCents));
@@ -733,19 +716,21 @@ app.post('/api/boost', async (req, res) => {
   if (amount % 100 !== 0) return res.status(400).json({ error: 'Boosts are in whole rupees, with no paise.' });
   if (!validEmail(email)) return res.status(400).json({ error: 'A valid email is required for your receipt.' });
   if (!b.acceptTerms) return res.status(400).json({ error: 'Please accept the Terms to continue.' });
-  const providerError = PAYMENT_PROVIDER === 'youpi' ? youpiConfigError() : PAYMENT_PROVIDER === 'stripe' && !stripe ? 'Stripe payments are not configured.' : null;
+  const providerError = process.env.VERCEL && !DEMO && db.dialect !== 'postgres'
+    ? 'Configure managed Postgres before accepting real payments on Vercel.'
+    : PAYMENT_PROVIDER === 'youpi' ? youpiConfigError() : PAYMENT_PROVIDER === 'stripe' && !stripe ? 'Stripe payments are not configured.' : null;
   if (providerError) return res.status(503).json({ error: providerError });
 
   try {
     let listing;
     if (b.listingId) {
       // Boosting something that is already on the chart. Its details are fixed.
-      listing = db.prepare('SELECT * FROM listings WHERE id=? AND hidden=0 AND live=1').get(clean(b.listingId, 40));
+      listing = await db.prepare('SELECT * FROM listings WHERE id=? AND hidden=0 AND live=1').get(clean(b.listingId, 40));
       if (!listing) return res.status(404).json({ error: 'That listing was not found.' });
     } else {
       const t = normalizeTarget(b.url);
       if (t.error) return res.status(400).json({ error: t.error });
-      listing = db.prepare('SELECT * FROM listings WHERE key=?').get(t.key);
+      listing = await db.prepare('SELECT * FROM listings WHERE key=?').get(t.key);
       if (listing && listing.hidden) return res.status(400).json({ error: 'This listing has been removed from the site.' });
       if (!listing || !listing.live) {
         // A new listing: whoever pays first sets its title, description and category. They are locked after that.
@@ -758,25 +743,25 @@ app.post('/api/boost', async (req, res) => {
         if (newName) {
           const v = validCategoryName(newName);
           if (v.error) return res.status(400).json({ error: v.error });
-          const ex = findCategoryByName(v.name);
+          const ex = await findCategoryByName(v.name);
           if (ex) category = ex.slug; // already exists, so just use it
-          else if (customCategoryCount() >= MAX_CUSTOM_CATEGORIES) return res.status(400).json({ error: 'We have reached the limit for new categories. Please pick an existing one.' });
+          else if (await customCategoryCount() >= MAX_CUSTOM_CATEGORIES) return res.status(400).json({ error: 'We have reached the limit for new categories. Please pick an existing one.' });
           else pending = v.name; // created only once the payment completes
-        } else if (slug && categoryExists(slug)) category = slug;
+        } else if (slug && await categoryExists(slug)) category = slug;
         else return res.status(400).json({ error: 'Pick a category, or create a new one.' });
         if (!listing) {
           listing = { id: newId() };
-          db.prepare('INSERT INTO listings (id,key,url,platform,title,description,image,category,pending_category,live,is_demo) VALUES (?,?,?,?,?,?,?,?,?,0,?)')
+          await db.prepare('INSERT INTO listings (id,key,url,platform,title,description,image,category,pending_category,live,is_demo) VALUES (?,?,?,?,?,?,?,?,?,0,?)')
             .run(listing.id, t.key, t.url, t.platform, title, description, t.image, category, pending, DEMO ? 1 : 0);
         } else {
-          db.prepare('UPDATE listings SET url=?, platform=?, title=?, description=?, image=?, category=?, pending_category=? WHERE id=?')
+          await db.prepare('UPDATE listings SET url=?, platform=?, title=?, description=?, image=?, category=?, pending_category=? WHERE id=?')
             .run(t.url, t.platform, title, description, t.image, category, pending, listing.id);
         }
-        listing = db.prepare('SELECT * FROM listings WHERE id=?').get(listing.id);
+        listing = await db.prepare('SELECT * FROM listings WHERE id=?').get(listing.id);
       }
     }
 
-    const info = db.prepare(`INSERT INTO boosts (listing_id,amount_cents,currency,period,display_name,message,email,is_demo) VALUES (?,?,?,?,?,?,?,?)`)
+    const info = await db.prepare(`INSERT INTO boosts (listing_id,amount_cents,currency,period,display_name,message,email,is_demo) VALUES (?,?,?,?,?,?,?,?)`)
       .run(listing.id, amount, CURRENCY, currentPeriod(), clean(b.displayName, 40) || null, clean(b.message, 140) || null, email, DEMO ? 1 : 0);
     const boostId = info.lastInsertRowid;
 
@@ -806,7 +791,7 @@ app.post('/api/boost', async (req, res) => {
       const checkoutUrl = new URL(session.checkoutUrl);
       if (checkoutUrl.origin !== new URL(YOUPI_API_URL).origin || checkoutUrl.protocol !== 'https:' && (process.env.VERCEL || process.env.NODE_ENV === 'production'))
         throw new Error('YOUPI returned an untrusted checkout URL');
-      db.prepare('UPDATE boosts SET payment_session=? WHERE id=?').run(String(session.paymentId), boostId);
+      await db.prepare('UPDATE boosts SET payment_session=? WHERE id=?').run(String(session.paymentId), boostId);
       return res.json({ url: checkoutUrl.href });
     }
 
@@ -825,48 +810,48 @@ app.post('/api/boost', async (req, res) => {
       success_url: `${BASE_URL}/success.html?boost=${boostId}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: listing.live ? `${BASE_URL}/listing.html?id=${encodeURIComponent(listing.id)}&cancelled=1` : `${BASE_URL}/boost.html?cancelled=1`,
     });
-    db.prepare('UPDATE boosts SET stripe_session=? WHERE id=?').run(session.id, boostId);
+    await db.prepare('UPDATE boosts SET stripe_session=? WHERE id=?').run(session.id, boostId);
     res.json({ url: session.url });
   } catch (e) {
     console.error('boost error:', e.message);
     res.status(502).json({ error: 'Could not start checkout. Please try again.' });
   }
-});
+}));
 
-app.get('/api/boost/:id', async (req, res) => {
-  const b = db.prepare('SELECT b.id,b.status,b.amount_cents,b.currency,b.period,b.stripe_session,b.payment_session,l.id listing_id,l.title,l.key,l.url,l.image FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.id=?').get(req.params.id);
+app.get('/api/boost/:id', asyncRoute(async (req, res) => {
+  const b = await db.prepare('SELECT b.id,b.status,b.amount_cents,b.currency,b.period,b.stripe_session,b.payment_session,l.id listing_id,l.title,l.key,l.url,l.image FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.id=?').get(req.params.id);
   if (!b) return res.status(404).json({ error: 'Not found' });
   // Backup for a delayed webhook: confirm directly with Stripe, only for the matching session id.
   if (b.status === 'pending' && PAYMENT_PROVIDER === 'stripe' && stripe && b.stripe_session && req.query.session_id === b.stripe_session) {
     try {
       const s = await stripe.checkout.sessions.retrieve(b.stripe_session);
-      if (s.payment_status === 'paid') { markPaid(b.id, s); b.status = 'paid'; }
+      if (s.payment_status === 'paid') { await markPaid(b.id, s); b.status = 'paid'; }
     } catch (e) { /* webhook will settle it */ }
   }
   delete b.stripe_session;
   delete b.payment_session;
   res.json(b);
-});
+}));
 
-app.get('/api/demo/boost/:id', (req, res) => {
+app.get('/api/demo/boost/:id', asyncRoute(async (req, res) => {
   if (!DEMO) return res.status(404).end();
-  const b = db.prepare('SELECT b.id,b.status,b.amount_cents,b.currency,l.title,l.key FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.id=?').get(req.params.id);
+  const b = await db.prepare('SELECT b.id,b.status,b.amount_cents,b.currency,l.title,l.key FROM boosts b JOIN listings l ON l.id=b.listing_id WHERE b.id=?').get(req.params.id);
   b ? res.json(b) : res.status(404).json({ error: 'Not found' });
-});
-app.post('/api/demo/confirm/:id', (req, res) => {
+}));
+app.post('/api/demo/confirm/:id', asyncRoute(async (req, res) => {
   if (!DEMO) return res.status(404).end(); // disabled automatically once a Stripe key is set
-  markPaid(Number(req.params.id));
+  await markPaid(Number(req.params.id));
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/contact', (req, res) => {
+app.post('/api/contact', asyncRoute(async (req, res) => {
   if (!rateLimit('c:' + req.ip, 5, 3600000)) return res.status(429).json({ error: 'Too many messages. Try again later.' });
   const { name, email, body } = req.body || {};
   if (!clean(name, 80) || !validEmail(clean(email, 200)) || clean(body, 2000).length < 10)
     return res.status(400).json({ error: 'Please fill in your name, a valid email and a message (10+ characters).' });
-  db.prepare('INSERT INTO messages (name,email,body) VALUES (?,?,?)').run(clean(name, 80), clean(email, 200), clean(body, 2000));
+  await db.prepare('INSERT INTO messages (name,email,body) VALUES (?,?,?)').run(clean(name, 80), clean(email, 200), clean(body, 2000));
   res.json({ ok: true });
-});
+}));
 
 // ---------- admin ----------
 function adminAuth(req, res, next) {
@@ -882,68 +867,79 @@ function adminAuth(req, res, next) {
   res.set('WWW-Authenticate', 'Basic realm="Admin"').status(401).send('Authentication required');
 }
 app.get('/admin', adminAuth, (req, res) => res.sendFile(path.join(__dirname, 'admin', 'admin.html')));
-app.get('/api/admin/overview', adminAuth, (req, res) => {
-  const paid = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid'`).get();
-  const month = db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c FROM boosts WHERE status='paid' AND period=?`).get(currentPeriod()).c;
-  const boosts = db.prepare(`SELECT b.id,b.amount_cents,b.currency,b.status,b.period,b.display_name,b.email,b.created_at,b.paid_at,l.id listing_id,l.title,l.key FROM boosts b JOIN listings l ON l.id=b.listing_id ORDER BY b.id DESC LIMIT 100`).all();
-  const listings = db.prepare("SELECT id,title,description,key,url,hidden,live,COALESCE(category,'other') AS category FROM listings WHERE live=1 ORDER BY created_at DESC LIMIT 300").all();
-  const cats = db.prepare(`SELECT c.slug,c.name,c.builtin,(SELECT COUNT(*) FROM listings l WHERE COALESCE(l.category,'other')=c.slug AND l.live=1) AS n FROM categories c ORDER BY c.sort, c.name`).all();
-  const messages = db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT 50').all();
+app.get('/api/admin/overview', adminAuth, asyncRoute(async (req, res) => {
+  const [paid, monthResult, boosts, listings, cats, messages] = await Promise.all([
+    db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c, COUNT(*) n FROM boosts WHERE status='paid'`).get(),
+    db.prepare(`SELECT COALESCE(SUM(amount_cents),0) c FROM boosts WHERE status='paid' AND period=?`).get(currentPeriod()),
+    db.prepare(`SELECT b.id,b.amount_cents,b.currency,b.status,b.period,b.display_name,b.email,b.created_at,b.paid_at,l.id listing_id,l.title,l.key FROM boosts b JOIN listings l ON l.id=b.listing_id ORDER BY b.id DESC LIMIT 100`).all(),
+    db.prepare("SELECT id,title,description,key,url,hidden,live,COALESCE(category,'other') AS category FROM listings WHERE live=1 ORDER BY created_at DESC LIMIT 300").all(),
+    db.prepare(`SELECT c.slug,c.name,c.builtin,(SELECT COUNT(*) FROM listings l WHERE COALESCE(l.category,'other')=c.slug AND l.live=1) AS n FROM categories c ORDER BY c.sort, c.name`).all(),
+    db.prepare('SELECT * FROM messages ORDER BY id DESC LIMIT 50').all(),
+  ]);
+  const month = monthResult.c;
   res.json({ categories: cats, currency: CURRENCY, demo: DEMO, total_cents: paid.c, total_boosts: paid.n, month_cents: month, boosts, listings, messages });
-});
-app.post('/api/admin/listings/:id/hidden', adminAuth, (req, res) => {
-  db.prepare('UPDATE listings SET hidden=? WHERE id=?').run(req.body && req.body.hidden ? 1 : 0, req.params.id);
+}));
+app.post('/api/admin/listings/:id/hidden', adminAuth, asyncRoute(async (req, res) => {
+  await db.prepare('UPDATE listings SET hidden=? WHERE id=?').run(req.body && req.body.hidden ? 1 : 0, req.params.id);
   res.json({ ok: true });
-});
-app.post('/api/admin/listings/:id/category', adminAuth, (req, res) => {
+}));
+app.post('/api/admin/listings/:id/category', adminAuth, asyncRoute(async (req, res) => {
   const cat = req.body && req.body.category;
-  if (!categoryExists(cat)) return res.status(400).json({ error: 'Unknown category.' });
-  db.prepare('UPDATE listings SET category=? WHERE id=?').run(cat, req.params.id);
+  if (!await categoryExists(cat)) return res.status(400).json({ error: 'Unknown category.' });
+  await db.prepare('UPDATE listings SET category=? WHERE id=?').run(cat, req.params.id);
   res.json({ ok: true });
-});
-app.post('/api/admin/listings/:id/edit', adminAuth, (req, res) => {
+}));
+app.post('/api/admin/listings/:id/edit', adminAuth, asyncRoute(async (req, res) => {
   const title = clean(req.body && req.body.title, 70), description = clean(req.body && req.body.description, 160);
   if (title.length < 2 || description.length < 10) return res.status(400).json({ error: 'Title 2+ characters and description 10+ characters.' });
-  db.prepare('UPDATE listings SET title=?, description=? WHERE id=?').run(title, description, req.params.id);
+  await db.prepare('UPDATE listings SET title=?, description=? WHERE id=?').run(title, description, req.params.id);
   res.json({ ok: true });
-});
-app.post('/api/admin/categories/:slug/rename', adminAuth, (req, res) => {
+}));
+app.post('/api/admin/categories/:slug/rename', adminAuth, asyncRoute(async (req, res) => {
   const v = validCategoryName(req.body && req.body.name);
   if (v.error) return res.status(400).json({ error: v.error });
-  const clash = findCategoryByName(v.name);
+  const clash = await findCategoryByName(v.name);
   if (clash && clash.slug !== req.params.slug) return res.status(400).json({ error: 'A category with that name already exists.' });
-  db.prepare('UPDATE categories SET name=? WHERE slug=?').run(v.name, req.params.slug);
+  await db.prepare('UPDATE categories SET name=? WHERE slug=?').run(v.name, req.params.slug);
   res.json({ ok: true });
-});
-app.post('/api/admin/categories/:slug/delete', adminAuth, (req, res) => {
-  const c = db.prepare('SELECT * FROM categories WHERE slug=?').get(req.params.slug);
+}));
+app.post('/api/admin/categories/:slug/delete', adminAuth, asyncRoute(async (req, res) => {
+  const c = await db.prepare('SELECT * FROM categories WHERE slug=?').get(req.params.slug);
   if (!c || c.builtin) return res.status(400).json({ error: 'Only categories created by users can be deleted.' });
-  db.prepare("UPDATE listings SET category='other' WHERE category=?").run(c.slug);
-  db.prepare('DELETE FROM categories WHERE slug=?').run(c.slug);
+  await db.transaction(async (transaction) => {
+    await transaction.prepare("UPDATE listings SET category='other' WHERE category=?").run(c.slug);
+    await transaction.prepare('DELETE FROM categories WHERE slug=?').run(c.slug);
+  });
   res.json({ ok: true });
-});
-app.post('/api/admin/boosts/:id/refund', adminAuth, async (req, res) => {
-  const b = db.prepare('SELECT * FROM boosts WHERE id=?').get(req.params.id);
+}));
+app.post('/api/admin/boosts/:id/refund', adminAuth, asyncRoute(async (req, res) => {
+  const b = await db.prepare('SELECT * FROM boosts WHERE id=?').get(req.params.id);
   if (!b || b.status !== 'paid') return res.status(400).json({ error: 'Only paid boosts can be refunded.' });
   if (PAYMENT_PROVIDER === 'youpi') return res.status(400).json({ error: 'Refund this payment in your YOUPI gateway before changing its status.' });
   try {
     if (stripe && b.stripe_payment_intent) await stripe.refunds.create({ payment_intent: b.stripe_payment_intent });
     else if (stripe) return res.status(400).json({ error: 'No payment reference stored; refund in the Stripe dashboard.' });
-    db.prepare(`UPDATE boosts SET status='refunded' WHERE id=?`).run(b.id);
+    await db.prepare(`UPDATE boosts SET status='refunded' WHERE id=?`).run(b.id);
     res.json({ ok: true });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
-});
+}));
 
 // ---------- static ----------
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], maxAge: '1h' }));
 app.use((req, res) => res.status(404).sendFile(path.join(__dirname, 'public', '404.html')));
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error('Request failed:', error.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
 const startServer = () => {
   const server = app.listen(PORT, () => {
     console.log(`\n${SITE_NAME} is running.  Open this in your browser:  ${BASE_URL}\n`);
-    console.log(`Payments: ${DEMO ? 'DEMO MODE (no Stripe key, simulated checkout)' : 'Stripe enabled'}`);
+    console.log(`Storage: ${db.dialect === 'postgres' ? 'managed Postgres' : 'SQLite (local/demo fallback)'}`);
+    console.log(`Payments: ${DEMO ? 'DEMO MODE (simulated checkout)' : PAYMENT_PROVIDER === 'youpi' ? 'YOUPI PG' : 'Stripe enabled'}`);
     console.log(`Visitors: ${DF_KEY ? 'DataFast API' : 'built-in counter (add DATAFAST_API_KEY to use DataFast)'}`);
     if (!ADMIN_PASSWORD) console.log('Admin: disabled (set ADMIN_PASSWORD in .env)');
   });
