@@ -93,7 +93,7 @@ Copy `.env.example` to `.env` and configure values before going live.
 
 Key settings include:
 
-- `PAYMENT_PROVIDER` selects `demo`, `stripe`, or `youpi`. If unset, the app selects Stripe when `STRIPE_SECRET_KEY` is set, otherwise demo mode.
+- `PAYMENT_PROVIDER` selects `demo`, `stripe`, or `youpi`. Locally it defaults to demo when Stripe is absent; on Vercel it defaults to unconfigured so missing credentials never create fake paid boosts.
 - `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` for Stripe payments
 - `YOUPI_API_URL`, `YOUPI_MERCHANT_ID`, and `YOUPI_WEBHOOK_SECRET` for YOUPI PG payments
 - `BASE_URL` for public links and payment return redirects
@@ -104,7 +104,7 @@ Key settings include:
 - `SITE_TIMEZONE` for month-reset timing
 - `DATA_DIR` for the local SQLite fallback
 
-When no payment provider is configured, the app runs in demo mode and simulates transactions instead of charging real money.
+When no provider is configured, local development uses demo checkout. Vercel keeps demo listings visible but disables checkout and returns a setup error until a real payment provider and managed Postgres are configured.
 
 ### YOUPI PG setup
 

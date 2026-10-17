@@ -33,12 +33,13 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const DEFAULT_DATA_DIR = process.env.VERCEL ? '/tmp/monthlytop-data' : path.join(__dirname, 'data');
 const DATA_DIR = process.env.DATA_DIR || DEFAULT_DATA_DIR;
 const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
-const PAYMENT_PROVIDER = (process.env.PAYMENT_PROVIDER || (stripe ? 'stripe' : 'demo')).toLowerCase();
+const PAYMENT_PROVIDER = (process.env.PAYMENT_PROVIDER || (stripe ? 'stripe' : process.env.VERCEL ? 'unconfigured' : 'demo')).toLowerCase();
 const YOUPI_API_URL = (process.env.YOUPI_API_URL || '').replace(/\/+$/, '');
 const YOUPI_MERCHANT_ID = process.env.YOUPI_MERCHANT_ID || '';
 const YOUPI_WEBHOOK_SECRET = process.env.YOUPI_WEBHOOK_SECRET || '';
-if (!['demo', 'stripe', 'youpi'].includes(PAYMENT_PROVIDER)) throw new Error('PAYMENT_PROVIDER must be demo, stripe, or youpi.');
+if (!['demo', 'stripe', 'youpi', 'unconfigured'].includes(PAYMENT_PROVIDER)) throw new Error('PAYMENT_PROVIDER must be demo, stripe, or youpi.');
 const DEMO = PAYMENT_PROVIDER === 'demo';
+const SEED_DEMO_LISTINGS = DEMO || PAYMENT_PROVIDER === 'unconfigured';
 function youpiConfigError() {
   if (CURRENCY !== 'inr') return 'YOUPI payments require CURRENCY=inr.';
   if (!YOUPI_API_URL || !YOUPI_MERCHANT_ID || !YOUPI_WEBHOOK_SECRET) return 'YOUPI payments are not fully configured.';
@@ -321,7 +322,7 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
       .run(slug, name, blurb, icon, slug === 'other' ? 2000 : (index + 1) * 10);
   }
 
-  if (DEMO) {
+  if (SEED_DEMO_LISTINGS) {
     // A few clearly fictional listings so the site is browsable before launch. They never appear once a Stripe key is set.
     if ((await db.prepare('SELECT COUNT(*) c FROM listings').get()).c === 0) {
       const demo = [
@@ -452,7 +453,10 @@ async function categoryOverview() {
 }
 async function markPaid(boostId, session) {
   return db.transaction(async (transaction) => {
-    const b = await transaction.prepare('SELECT * FROM boosts WHERE id=?').get(boostId);
+    const lockQuery = transaction.dialect === 'postgres'
+      ? 'SELECT * FROM boosts WHERE id=? FOR UPDATE'
+      : 'SELECT * FROM boosts WHERE id=?';
+    const b = await transaction.prepare(lockQuery).get(boostId);
     if (!b || b.status === 'paid') return b;
     if (PAYMENT_PROVIDER === 'youpi') {
       await transaction.prepare(`UPDATE boosts SET status='paid', paid_at=datetime('now'), payment_reference=COALESCE(?,payment_reference) WHERE id=?`)
@@ -613,7 +617,8 @@ app.use(express.json({ limit: '20kb' }));
 
 app.get('/api/config', asyncRoute(async (req, res) => {
   res.json({
-    siteName: SITE_NAME, currency: CURRENCY, minCents: MIN_CENTS, maxCents: MAX_CENTS, demo: DEMO, paymentProvider: PAYMENT_PROVIDER, period: currentPeriod(),
+    siteName: SITE_NAME, currency: CURRENCY, minCents: MIN_CENTS, maxCents: MAX_CENTS, demo: DEMO, paymentProvider: PAYMENT_PROVIDER,
+    paymentReady: DEMO || PAYMENT_PROVIDER === 'stripe' && !!stripe || PAYMENT_PROVIDER === 'youpi' && !youpiConfigError(), period: currentPeriod(),
     categories: await listCategories(), platforms: PLATFORM_LABELS, creator: CREATOR, timezone: SITE_TZ,
     datafast: { websiteId: DF_ID, domain: DF_DOMAIN, shareUrl: DF_SHARE },
   });
@@ -716,7 +721,9 @@ app.post('/api/boost', asyncRoute(async (req, res) => {
   if (amount % 100 !== 0) return res.status(400).json({ error: 'Boosts are in whole rupees, with no paise.' });
   if (!validEmail(email)) return res.status(400).json({ error: 'A valid email is required for your receipt.' });
   if (!b.acceptTerms) return res.status(400).json({ error: 'Please accept the Terms to continue.' });
-  const providerError = process.env.VERCEL && !DEMO && db.dialect !== 'postgres'
+  const providerError = PAYMENT_PROVIDER === 'unconfigured'
+    ? 'Real payments are not configured yet. Set PAYMENT_PROVIDER and provider credentials in the deployment settings.'
+    : process.env.VERCEL && !DEMO && db.dialect !== 'postgres'
     ? 'Configure managed Postgres before accepting real payments on Vercel.'
     : PAYMENT_PROVIDER === 'youpi' ? youpiConfigError() : PAYMENT_PROVIDER === 'stripe' && !stripe ? 'Stripe payments are not configured.' : null;
   if (providerError) return res.status(503).json({ error: providerError });
@@ -939,7 +946,7 @@ const startServer = () => {
   const server = app.listen(PORT, () => {
     console.log(`\n${SITE_NAME} is running.  Open this in your browser:  ${BASE_URL}\n`);
     console.log(`Storage: ${db.dialect === 'postgres' ? 'managed Postgres' : 'SQLite (local/demo fallback)'}`);
-    console.log(`Payments: ${DEMO ? 'DEMO MODE (simulated checkout)' : PAYMENT_PROVIDER === 'youpi' ? 'YOUPI PG' : 'Stripe enabled'}`);
+    console.log(`Payments: ${DEMO ? 'DEMO MODE (simulated checkout)' : PAYMENT_PROVIDER === 'youpi' ? 'YOUPI PG' : PAYMENT_PROVIDER === 'stripe' ? stripe ? 'Stripe enabled' : 'Stripe not configured' : 'real payments not configured'}`);
     console.log(`Visitors: ${DF_KEY ? 'DataFast API' : 'built-in counter (add DATAFAST_API_KEY to use DataFast)'}`);
     if (!ADMIN_PASSWORD) console.log('Admin: disabled (set ADMIN_PASSWORD in .env)');
   });

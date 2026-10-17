@@ -90,6 +90,7 @@ async function createSqliteDb(file) {
     fs.writeFileSync(temporaryFile, Buffer.from(raw.export()));
     fs.renameSync(temporaryFile, file);
   };
+  let transactionTail = Promise.resolve();
   const toBind = (args) => {
     if (args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0])) {
       const values = {};
@@ -129,19 +130,30 @@ async function createSqliteDb(file) {
       };
     },
     async transaction(callback) {
-      raw.exec('BEGIN');
-      transactionDepth++;
+      const predecessor = transactionTail;
+      let release;
+      transactionTail = new Promise((resolve) => { release = resolve; });
+      await predecessor;
+      let transactionOpen = false;
       try {
+        raw.exec('BEGIN');
+        transactionOpen = true;
+        transactionDepth++;
         const result = await callback(database);
         raw.exec('COMMIT');
+        transactionOpen = false;
         transactionDepth--;
         if (!transactionDepth) persist();
         return result;
       } catch (error) {
-        raw.exec('ROLLBACK');
-        transactionDepth--;
-        if (!transactionDepth) persist();
+        if (transactionOpen) {
+          raw.exec('ROLLBACK');
+          transactionDepth--;
+          if (!transactionDepth) persist();
+        }
         throw error;
+      } finally {
+        release();
       }
     },
     async close() { raw.close(); },

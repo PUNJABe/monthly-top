@@ -134,8 +134,8 @@
       <div class="field"><label for="msg">Message (optional, shown on the listing page)</label><input id="msg" type="text" maxlength="140"></div>
       <label class="check"><input type="checkbox" id="terms"><span>I agree to the <a href="/terms.html" target="_blank">Terms</a>, <a href="/privacy.html" target="_blank">Privacy Policy</a> and <a href="/refunds.html" target="_blank">Refund Policy</a>. I understand a boost is a payment for ranking: it is not an endorsement, and it does not buy the listed product or any rights in it.</span></label>
       <div class="err" id="err" role="alert"></div>
-      <button class="btn" id="go" type="submit" style="width:100%">Continue to payment</button>
-      <p class="muted" style="font-size:.78rem;margin:12px 0 0">${cfg.demo ? 'Demo mode: no real payment will be taken.' : cfg.paymentProvider === 'youpi' ? 'Hosted UPI checkout by YOUPI. Boosts are confirmed by signed payment notifications.' : 'Secure checkout by Stripe. We never see your card details.'}</p>`;
+      <button class="btn" id="go" type="submit" style="width:100%" ${cfg.paymentReady ? '' : 'disabled'}>${cfg.paymentReady ? 'Continue to payment' : 'Payments unavailable'}</button>
+      <p class="muted" style="font-size:.78rem;margin:12px 0 0">${cfg.demo ? 'Demo mode: no real payment will be taken.' : !cfg.paymentReady ? 'Real payments are not configured yet.' : cfg.paymentProvider === 'youpi' ? 'Hosted UPI checkout by YOUPI. Boosts are confirmed by signed payment notifications.' : 'Secure checkout by Stripe. We never see your card details.'}</p>`;
   };
   App.boostBind = (root) => {
     const cfg = App.config;
