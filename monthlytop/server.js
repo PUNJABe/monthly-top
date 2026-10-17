@@ -533,6 +533,7 @@ async function getVisitors() {
 
 // ---------- app ----------
 const app = express();
+module.exports = app;
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -847,7 +848,7 @@ app.post('/api/admin/boosts/:id/refund', adminAuth, async (req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], maxAge: '1h' }));
 app.use((req, res) => res.status(404).sendFile(path.join(__dirname, 'public', '404.html')));
 
-initDb().then(() => {
+const startServer = () => {
   const server = app.listen(PORT, () => {
     console.log(`\n${SITE_NAME} is running.  Open this in your browser:  ${BASE_URL}\n`);
     console.log(`Payments: ${DEMO ? 'DEMO MODE (no Stripe key, simulated checkout)' : 'Stripe enabled'}`);
@@ -859,4 +860,10 @@ initDb().then(() => {
     else console.error(e);
     process.exit(1);
   });
-}).catch((e) => { console.error('Could not start:', e); process.exit(1); });
+};
+
+if (require.main === module) {
+  initDb().then(startServer).catch((e) => { console.error('Could not start:', e); process.exit(1); });
+} else {
+  initDb().catch((e) => { console.error('Could not initialize app:', e); process.exit(1); });
+}
