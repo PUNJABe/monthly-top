@@ -934,7 +934,13 @@ app.post('/api/admin/boosts/:id/refund', adminAuth, asyncRoute(async (req, res) 
 }));
 
 // ---------- static ----------
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], maxAge: '1h' }));
+app.use(express.static(path.join(__dirname, 'public'), {
+  extensions: ['html'],
+  maxAge: '1h',
+  setHeaders(res, filePath) {
+    if (/\.(html|js)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  },
+}));
 app.use((req, res) => res.status(404).sendFile(path.join(__dirname, 'public', '404.html')));
 app.use((error, req, res, next) => {
   if (res.headersSent) return next(error);

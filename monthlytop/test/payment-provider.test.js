@@ -29,6 +29,10 @@ test('Vercel without provider credentials keeps samples but disables demo paymen
   assert.equal(config.paymentReady, false);
   assert.ok(config.categories.length > 0);
 
+  const scriptResponse = await fetch(`${baseUrl}/js/app.js`);
+  assert.match(scriptResponse.headers.get('cache-control') || '', /no-cache/);
+  assert.match(await scriptResponse.text(), /Payments unavailable/);
+
   const boostResponse = await fetch(`${baseUrl}/api/boost`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
