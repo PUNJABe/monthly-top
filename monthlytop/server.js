@@ -534,6 +534,7 @@ async function getVisitors() {
 
 // ---------- app ----------
 const app = express();
+const dbReady = initDb();
 module.exports = app;
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -545,6 +546,12 @@ app.use((req, res, next) => {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   });
   next();
+});
+app.use((req, res, next) => {
+  dbReady.then(
+    () => next(),
+    () => res.status(503).send('Service temporarily unavailable')
+  );
 });
 
 // Stripe webhook needs the raw body, so it is registered before express.json()
@@ -864,7 +871,7 @@ const startServer = () => {
 };
 
 if (require.main === module) {
-  initDb().then(startServer).catch((e) => { console.error('Could not start:', e); process.exit(1); });
+  dbReady.then(startServer).catch((e) => { console.error('Could not start:', e); process.exit(1); });
 } else {
-  initDb().catch((e) => { console.error('Could not initialize app:', e); process.exit(1); });
+  dbReady.catch((e) => { console.error('Could not initialize app:', e); });
 }
